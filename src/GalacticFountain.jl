@@ -9,15 +9,13 @@ function Sigma_g(R, R_g, sigma_g0)
 end
 
 
-function ks_sfr_Sigma_star(R, R_g, sigma_g0, A, N)
+function ks_Sigma_star(R, R_g, sigma_g0, A, N)
     # Kennicutt-Schmidt SFR surface density
     return A * Sigma_g(R, R_g, sigma_g0)^N
 end
 
 
-
-
-# CGM interaction (currently unexplored)
+# CGM interaction (currently unused)
 
 
 # fountain landing
@@ -40,15 +38,27 @@ function Mdot_star(R_g, sigma_g0, A, N, R_w, R_out)
 end
 
 
+function Sigmadot_star()
+   return
+end
+
 
 # angular momentum conservation
 
 function v_r(R, sigma_g0, A, N, Mdot_land, R_out, R_w)  )
+    return
+end
 
-
+function j_land
+    return
+end
 
 
 # diagnostics
+
+function j_ratio
+    return
+end
 
 
 

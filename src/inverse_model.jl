@@ -5,7 +5,7 @@ end
 
 
 function v_R(R, R_g, sigma_g0, A, N, Mdot_land, R_nucl, R_out)
-    # radial velocity of disk gas induced by mass and angular momnetum deposition of incident fountain gas
+    # radial velocity of disk gas induced by mass and angular #momnetum deposition of incident fountain gas
     integrand(r) = r * (Sigmadot_land(r, Mdot_land, R_nucl, R_out) - Sigma_star_ks(r, R_g, sigma_g0, A, N))
 
     integral, error = quadgk(integrand, R_out, R)

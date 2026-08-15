@@ -21,3 +21,8 @@ function j_rotcurve_flat(R, v_c)
     # flat rotation curve
     return v_c * R
 end
+
+function j_land_mixing(R, R_nucl, mu, beta, v_c)
+    # specific angular momentum of incident fountain gas after mixing with CGM
+    return (j_rotcurve_flat(R_nucl, v_c) + j_cgm(R, beta, v_c) * mu )/ (1+mu)
+end

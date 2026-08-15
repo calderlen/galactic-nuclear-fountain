@@ -22,3 +22,15 @@ function metallicity_ode(Z,p,R)
     return dZ_dR(Z, R, p.R_g, p.M_g, p.R_nucl, p.R_out, p.A, p.N, p.Mdot_nucl, p.f, p.n, p.Z_land, p.y)
 
 end
+
+
+
+
+function dZ_dR_forward(Z, R, R_g, sigma_g0, A, N, Sigmadot_land, R_nucl, mu, beta, Z_nucl, Z_CGM, y)
+
+    Z_land = Z_land_mixing(Z_nucl, Z_CGM, mu)
+
+    Sigmadot_star = Sigma_star_ks(R, R_g, sigma_g0, A, N)
+
+    return ((1 + mu)/(R_nucl + mu*beta*R - R*(1+mu)) * (Z_land - Z + y * Sigmadot_star / Sigmadot_land))
+end

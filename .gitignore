@@ -1,0 +1,10 @@
+/Manifest*.toml
+/LocalPreferences.toml
+/JuliaLocalPreferences.toml
+
+/input/
+/output/
+
+
+.*.kate-swp
+.DS_Store

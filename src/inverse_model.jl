@@ -24,3 +24,19 @@ function j_ratio_flat(R, R_g, sigma_g0, A, N, Mdot_land, R_nucl, R_out, v_c)
         # ratio of specific angular momentum of incident fountain gas to that of circular orbit launched from the nuclear region radius
     return j_land(R, R_g, sigma_g0, A, N, Mdot_land, R_nucl, R_out, v_c) / j_rotcurve_flat(R_nucl, v_c)
 end
+
+
+"""Radial velocity from observed gas and SFR profiles, in kpc/yr."""
+function v_R_empirical(R, Sigma_g, Sigmadot_star, Sigmadot_land, R_out)
+    integrand(r) = r * (Sigmadot_land(r) - Sigmadot_star(r))
+    integral, error = quadgk(integrand, R_out, R)
+    return integral / (R * Sigma_g(R))
+end
+
+
+"""Required landing angular momentum for a general rotation curve."""
+function j_land_required(R, sigma_g, v_R, sigmadot_land, v_c, dv_c_dR)
+    j_disk = R * v_c
+    dj_disk_dR = v_c + R * dv_c_dR
+    return j_disk + sigma_g * v_R / sigmadot_land * dj_disk_dR
+end

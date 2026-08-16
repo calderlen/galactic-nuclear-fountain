@@ -19,7 +19,8 @@ const LEROY_FILE =
 const LEROY_RADIAL =
     joinpath(INPUT, "leroy2008", "RadialBins.dat")
 
-const OUTDIR = joinpath(ROOT, "output")
+# These are cleaned input tables used by the model, not model results.
+const OUTDIR = INPUT
 
 const ALIASES = Dict(
     "HOI"  => "UGC5139",

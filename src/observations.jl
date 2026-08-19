@@ -28,17 +28,42 @@ function linear_profile(x_values, y_values)
     all(diff(x) .> 0) || error("Radial coordinates must be unique and increasing")
 
     function profile(R)
-        (R < x[1] || R > x[end]) &&
+        boundary_tolerance = 16eps(max(abs(x[1]), abs(x[end]), 1.0))
+        (R < x[1] - boundary_tolerance || R > x[end] + boundary_tolerance) &&
             throw(DomainError(R, "requested radius is outside [$(x[1]), $(x[end])] kpc"))
+        query = clamp(R, x[1], x[end])
 
-        R == x[end] && return y[end]
+        query == x[end] && return y[end]
 
-        index = searchsortedlast(x, R)
-        fraction = (R - x[index]) / (x[index + 1] - x[index])
+        index = searchsortedlast(x, query)
+        fraction = (query - x[index]) / (x[index + 1] - x[index])
         return y[index] + fraction * (y[index + 1] - y[index])
     end
 
     return profile
+end
+
+
+"""Return the piecewise-constant derivative of a piecewise-linear profile."""
+function linear_profile_derivative(x_values, y_values)
+    order = sortperm(x_values)
+    x = Float64.(x_values[order])
+    y = Float64.(y_values[order])
+
+    length(x) >= 2 || error("A radial profile needs at least two points")
+    all(diff(x) .> 0) || error("Radial coordinates must be unique and increasing")
+
+    function derivative(R)
+        boundary_tolerance = 16eps(max(abs(x[1]), abs(x[end]), 1.0))
+        (R < x[1] - boundary_tolerance || R > x[end] + boundary_tolerance) &&
+            throw(DomainError(R, "requested radius is outside [$(x[1]), $(x[end])] kpc"))
+        query = clamp(R, x[1], x[end])
+
+        index = query == x[end] ? length(x) - 1 : searchsortedlast(x, query)
+        return (y[index + 1] - y[index]) / (x[index + 1] - x[index])
+    end
+
+    return derivative
 end
 
 
@@ -100,6 +125,84 @@ function fit_rising_rotation_curve(R_values, V_values, error_values)
 end
 
 
+"""
+Fit `Sigma(R) = Sigma0 * exp(-R / Rg)` by weighted least squares.
+
+The fit is performed in the native surface-density units, rather than in
+logarithmic space, so the supplied measurement errors retain their usual
+meaning. For each trial scale length the normalization is solved analytically.
+"""
+function fit_exponential_profile(R_values, Sigma_values, error_values)
+    R = Float64.(R_values)
+    Sigma = Float64.(Sigma_values)
+    errors = Float64.(error_values)
+
+    valid = isfinite.(R) .& isfinite.(Sigma) .& isfinite.(errors) .&
+        (R .>= 0) .& (Sigma .> 0) .& (errors .> 0)
+    R = R[valid]
+    Sigma = Sigma[valid]
+    errors = errors[valid]
+
+    length(R) >= 3 || error("An exponential-profile fit needs at least three points")
+
+    radial_span = maximum(R) - minimum(R)
+    radial_scale = max(maximum(R), radial_span, 1e-2)
+    Rg_min = max(radial_scale / 1000, 1e-3)
+    Rg_max = max(100 * radial_scale, 100 * Rg_min)
+    weights = 1.0 ./ errors.^2
+
+    best_chi2 = Inf
+    best_Sigma0 = NaN
+    best_Rg = NaN
+
+    for log_Rg in range(log(Rg_min), log(Rg_max), length=4000)
+        Rg = exp(log_Rg)
+        shape = exp.(-R ./ Rg)
+        Sigma0 = sum(weights .* shape .* Sigma) / sum(weights .* shape.^2)
+        chi2 = sum(weights .* (Sigma .- Sigma0 .* shape).^2)
+
+        if Sigma0 > 0 && chi2 < best_chi2
+            best_chi2 = chi2
+            best_Sigma0 = Sigma0
+            best_Rg = Rg
+        end
+    end
+
+    dof = length(R) - 2
+    return (
+        Sigma0 = best_Sigma0,
+        Rg = best_Rg,
+        chi2 = best_chi2,
+        dof = dof,
+        reduced_chi2 = dof > 0 ? best_chi2 / dof : NaN,
+    )
+end
+
+
+"""Fit a constant circular speed by weighted least squares."""
+function fit_flat_rotation_curve(V_values, error_values)
+    V = Float64.(V_values)
+    errors = Float64.(error_values)
+
+    valid = isfinite.(V) .& isfinite.(errors) .& (errors .> 0)
+    V = V[valid]
+    errors = errors[valid]
+
+    length(V) >= 2 || error("A flat rotation-curve fit needs at least two points")
+
+    weights = 1.0 ./ errors.^2
+    Vflat = sum(weights .* V) / sum(weights)
+    chi2 = sum(weights .* (V .- Vflat).^2)
+    dof = length(V) - 1
+    return (
+        Vflat = Vflat,
+        chi2 = chi2,
+        dof = dof,
+        reduced_chi2 = dof > 0 ? chi2 / dof : NaN,
+    )
+end
+
+
 function required_metadata(metadata, field)
     value = getproperty(metadata, field)
     ismissing(value) && error("Missing $(field) for $(metadata.galaxy)")
@@ -145,6 +248,10 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
         1e6 .* sqrt.(e_SigmaHI.^2 .+ e_SigmaH2.^2)
 
     Sigma_g = linear_profile(radial.R_kpc, radial.Sigma_g_Msun_kpc2)
+    dSigma_g_dR = linear_profile_derivative(
+        radial.R_kpc,
+        radial.Sigma_g_Msun_kpc2,
+    )
     Sigmadot_star = linear_profile(radial.R_kpc, radial.SigmaSFR_Msun_yr_kpc2)
 
     sparc = CSV.read(joinpath(input_dir, "sparc_rotation_curves.csv"), DataFrame)
@@ -208,6 +315,7 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
         radial = radial,
         sparc = sparc,
         Sigma_g = Sigma_g,
+        dSigma_g_dR = dSigma_g_dR,
         Sigmadot_star = Sigmadot_star,
         leroy_rotation = leroy_rotation,
         sparc_rotation = sparc_rotation,

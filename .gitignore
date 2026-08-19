@@ -4,6 +4,10 @@
 
 /input/
 /output/
+/build/
+
+__pycache__/
+*.py[cod]
 
 
 .*.kate-swp

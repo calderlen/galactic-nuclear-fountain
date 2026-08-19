@@ -1,6 +1,8 @@
-import GalacticWind
 using CSV
 using DataFrames
+
+include(joinpath(@__DIR__, "..", "..", "observations", "observations.jl"))
+using .Observations
 
 function catalog_sfr(metadata)
     !ismissing(metadata.SFR_leroy_Msun_yr) && return Float64(metadata.SFR_leroy_Msun_yr)
@@ -9,7 +11,7 @@ function catalog_sfr(metadata)
 end
 
 galaxy = length(ARGS) >= 1 ? ARGS[1] : "NGC3198"
-observations = GalacticWind.load_galaxy_observations(galaxy)
+observations = Observations.load_galaxy_observations(galaxy)
 output_directory = length(ARGS) >= 2 ? normpath(ARGS[2]) : joinpath(@__DIR__, "..", "..", "input", "model_inputs", observations.galaxy)
 Mdot_land = length(ARGS) >= 3 ? parse(Float64, ARGS[3]) : catalog_sfr(observations.metadata)
 R_nucl = length(ARGS) >= 4 ? parse(Float64, ARGS[4]) : max(0.5, observations.common_bounds[1])

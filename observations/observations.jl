@@ -1,3 +1,8 @@
+module Observations
+
+using CSV
+using DataFrames
+
 const DEFAULT_INPUT_DIR = normpath(joinpath(@__DIR__, "..", "input"))
 
 const GALAXY_ALIASES = Dict(
@@ -334,3 +339,5 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
         ),
     )
 end
+
+end # module

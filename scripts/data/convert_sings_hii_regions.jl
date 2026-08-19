@@ -1,7 +1,9 @@
 using CSV
 using DataFrames
 using Downloads
-using GalacticWind
+
+include(joinpath(@__DIR__, "..", "..", "observations", "observations.jl"))
+using .Observations
 
 # Moustakas et al. 2010, ApJS, 190, 233
 # VizieR catalog J/ApJS/190/233, DOI: 10.26093/cds/vizier.21900233
@@ -141,7 +143,7 @@ function read_hii_regions(path)
 
         push!(rows, (
             source_seq = source_seq,
-            galaxy = GalacticWind.normalize_galaxy_name(name_sings),
+            galaxy = Observations.normalize_galaxy_name(name_sings),
             name_sings = name_sings,
             hii_region = fixed_field(line, 15, 31),
             R_R25 = parse_float_field(line, 33, 36),
@@ -180,7 +182,7 @@ function read_sings_galaxies(path)
         name_sings = fixed_field(line, 1, 8)
         isempty(name_sings) && continue
 
-        galaxy = GalacticWind.normalize_galaxy_name(name_sings)
+        galaxy = Observations.normalize_galaxy_name(name_sings)
         rows[galaxy] = (
             D_sings_Mpc = parse_float_field(line, 64, 69),
             R25_sings_arcmin = parse_float_field(line, 26, 30),

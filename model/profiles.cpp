@@ -28,16 +28,6 @@ double flat_rotation_velocity_derivative(double R, const void* parameters){
     return 0.0;
 }
 
-double rising_rotation_velocity(double R,const void* raw_parameters){
-    const RisingRotationParameters& parameters=*static_cast<const RisingRotationParameters*>(raw_parameters);
-    return parameters.Vflat*(-std::expm1(-R/parameters.lflat));
-}
-
-double rising_rotation_velocity_derivative(double R,const void* raw_parameters){
-    const RisingRotationParameters& parameters=*static_cast<const RisingRotationParameters*>(raw_parameters);
-    return parameters.Vflat/parameters.lflat*std::exp(-R/parameters.lflat);
-}
-
 namespace {
 
 std::size_t linear_profile_interval(const LinearProfile& profile,double R){
@@ -60,10 +50,4 @@ double linear_profile_value(double R,const void* raw_parameters){
     const double query=std::clamp(R,profile.radius.front(),profile.radius.back());
     const double fraction=(query-profile.radius[interval])/(profile.radius[interval+1]-profile.radius[interval]);
     return profile.value[interval]+fraction*(profile.value[interval+1]-profile.value[interval]);
-}
-
-double linear_profile_derivative(double R,const void* raw_parameters){
-    const LinearProfile& profile=*static_cast<const LinearProfile*>(raw_parameters);
-    const std::size_t interval=linear_profile_interval(profile,R);
-    return (profile.value[interval+1]-profile.value[interval])/(profile.radius[interval+1]-profile.radius[interval]);
 }

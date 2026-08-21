@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <tuple>
 
-namespace galacticwind {
+namespace galactic_nuclear_fountain {
 namespace {
 
 const AbundanceMeasurement& abundance(const CatalogRow& row,Calibration calibration){
@@ -54,17 +54,20 @@ FitStatistics empty_statistics(
     const ComparisonMetadata& metadata,
     const std::string& status
 ){
-    return {
-        galaxy,calibration_name(calibration),family,curve,
-        static_cast<int>(observations.size()),static_cast<int>(unique_observations.size()),0,0,
-        std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,false,status,
-        std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,
-        std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,
-        std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,std::nullopt,
-        std::nullopt,std::nullopt,abundance_scatter_dex,metadata.Reff_kpc,
-        metadata.Z_outer_boundary,metadata.R_Z_boundary_kpc,
-        metadata.radial_H2_available,metadata.H2_treatment
-    };
+    FitStatistics result{};
+    result.galaxy=galaxy;
+    result.calibration=calibration_name(calibration);
+    result.model_family=family;
+    result.model_curve=curve;
+    result.n_catalog_usable=static_cast<int>(observations.size());
+    result.n_unique_catalog_regions=static_cast<int>(unique_observations.size());
+    result.fit_status=status;
+    result.abundance_scatter_added_dex=abundance_scatter_dex;
+    result.Z_outer_boundary=metadata.Z_outer_boundary;
+    result.R_Z_boundary_kpc=metadata.R_Z_boundary_kpc;
+    result.radial_H2_available=metadata.radial_H2_available;
+    result.H2_treatment=metadata.H2_treatment;
+    return result;
 }
 
 std::pair<double,double> minimum_maximum(const std::vector<double>& values){
@@ -78,6 +81,10 @@ std::string calibration_name(Calibration calibration){
     return calibration==Calibration::KK04 ? "KK04" : "PT05";
 }
 
+double oxygen_abundance_from_metallicity(double metallicity){
+    return OH12_sun+std::log10(metallicity/Z_sun);
+}
+
 std::vector<Observation> select_observations(
     const std::vector<CatalogRow>& catalog,
     const std::string& galaxy,
@@ -86,15 +93,13 @@ std::vector<Observation> select_observations(
     std::vector<Observation> observations;
     for (const CatalogRow& row: catalog) {
         const AbundanceMeasurement& selected=abundance(row,calibration);
-        if (row.galaxy!=galaxy || !selected.usable || !row.R_R25 || !row.R_kpc ||
-            !row.R_Reff || !selected.OH12 || !selected.e_OH12 || !selected.Z ||
-            !selected.e_Z_lo || !selected.e_Z_hi) {
+        if (row.galaxy!=galaxy || !selected.usable || !row.R_kpc ||
+            !selected.OH12 || !selected.e_OH12) {
             continue;
         }
         observations.push_back({
             row.source_sequence,row.hii_region,row.offset_ra_arcsec,row.offset_de_arcsec,
-            *row.R_R25,*row.R_kpc,*row.R_Reff,*selected.OH12,*selected.e_OH12,
-            *selected.Z,*selected.e_Z_lo,*selected.e_Z_hi
+            *row.R_kpc,*selected.OH12,*selected.e_OH12
         });
     }
     std::sort(observations.begin(),observations.end(),[](const Observation& left,const Observation& right){
@@ -127,15 +132,10 @@ std::vector<Observation> collapse_repeated_regions(const std::vector<Observation
         }
         const double OH12=weighted_OH12/weight_sum;
         const double e_OH12=std::sqrt(1.0/weight_sum);
-        const double Z=Z_sun*std::pow(10.0,OH12-OH12_sun);
-        const double Z_low=Z_sun*std::pow(10.0,OH12-e_OH12-OH12_sun);
-        const double Z_high=Z_sun*std::pow(10.0,OH12+e_OH12-OH12_sun);
         result.push_back({
             group.front().source_sequence,group.front().hii_region,
             group.front().offset_ra_arcsec,group.front().offset_de_arcsec,
-            weighted_mean(group,&Observation::R_R25),weighted_mean(group,&Observation::R_kpc),
-            weighted_mean(group,&Observation::R_Reff),
-            OH12,e_OH12,Z,Z-Z_low,Z_high-Z
+            weighted_mean(group,&Observation::R_kpc),OH12,e_OH12
         });
     }
     std::sort(result.begin(),result.end(),[](const Observation& left,const Observation& right){
@@ -156,23 +156,22 @@ std::vector<ResidualPoint> overlap_residuals(
             queries.push_back(observation.R_kpc);
         }
     }
-    std::vector<double> model_log;
-    model_log.reserve(curve.metallicity.size());
+    std::vector<double> model_OH12;
+    model_OH12.reserve(curve.metallicity.size());
     for (const double Z: curve.metallicity) {
-        model_log.push_back(std::log10(Z/Z_sun));
+        model_OH12.push_back(oxygen_abundance_from_metallicity(Z));
     }
-    const std::vector<double> interpolated=interpolate_profile(curve.radius_kpc,model_log,queries);
+    const std::vector<double> interpolated=interpolate_profile(curve.radius_kpc,model_OH12,queries);
     std::vector<ResidualPoint> residuals;
     residuals.reserve(overlapping.size());
     for (std::size_t index=0; index<overlapping.size(); ++index) {
         const Observation& observation=overlapping[index];
-        const double observed_log=observation.OH12-OH12_sun;
         const double sigma=std::sqrt(
             observation.e_OH12*observation.e_OH12+
             abundance_scatter_dex*abundance_scatter_dex
         );
         residuals.push_back({
-            observation,interpolated[index],observed_log-interpolated[index],sigma
+            observation,interpolated[index],observation.OH12-interpolated[index],sigma
         });
     }
     return residuals;
@@ -222,26 +221,20 @@ FitStatistics comparison_statistics(
     }
 
     std::vector<double> R_kpc;
-    std::vector<double> R_Reff;
-    std::vector<double> R_R25;
     std::vector<double> observed;
     std::vector<double> model;
     std::vector<double> residual_values;
     std::vector<double> sigma;
     for (const ResidualPoint& point: residuals) {
         R_kpc.push_back(point.observation.R_kpc);
-        R_Reff.push_back(point.observation.R_Reff);
-        R_R25.push_back(point.observation.R_R25);
-        observed.push_back(point.observation.OH12-OH12_sun);
-        model.push_back(point.model_log_Z_Zsun);
+        observed.push_back(point.observation.OH12);
+        model.push_back(point.model_OH12);
         residual_values.push_back(point.residual_dex);
         sigma.push_back(point.sigma_dex);
     }
 
     const LineFit observed_kpc=weighted_line_fit(R_kpc,observed,sigma);
-    const LineFit observed_Reff=weighted_line_fit(R_Reff,observed,sigma);
     const LineFit model_kpc=weighted_line_fit(R_kpc,model,sigma);
-    const LineFit model_Reff=weighted_line_fit(R_Reff,model,sigma);
 
     double weight_sum=0.0;
     double residual_sum=0.0;
@@ -250,7 +243,7 @@ FitStatistics comparison_statistics(
         const double weight=1.0/(sigma[index]*sigma[index]);
         weight_sum+=weight;
         residual_sum+=weight*residual_values[index];
-        pivot_sum+=weight*R_Reff[index];
+        pivot_sum+=weight*R_kpc[index];
     }
     const double offset=residual_sum/weight_sum;
     const double pivot=pivot_sum/weight_sum;
@@ -262,7 +255,7 @@ FitStatistics comparison_statistics(
     double chi2_offset=0.0;
     for (std::size_t index=0; index<residuals.size(); ++index) {
         const double centered_value=residual_values[index]-offset;
-        pivoted_R.push_back(R_Reff[index]-pivot);
+        pivoted_R.push_back(R_kpc[index]-pivot);
         residual_square_sum+=residual_values[index]*residual_values[index];
         centered_square_sum+=centered_value*centered_value;
         chi2_fixed+=residual_values[index]*residual_values[index]/(sigma[index]*sigma[index]);
@@ -270,31 +263,50 @@ FitStatistics comparison_statistics(
     }
     const LineFit residual_fit=weighted_line_fit(pivoted_R,residual_values,sigma);
     const auto kpc_limits=minimum_maximum(R_kpc);
-    const auto Reff_limits=minimum_maximum(R_Reff);
-    const auto R25_limits=minimum_maximum(R_R25);
-    const double Reff_span=Reff_limits.second-Reff_limits.first;
+    const double kpc_span=kpc_limits.second-kpc_limits.first;
     const int count=static_cast<int>(residuals.size());
-    const bool reliable=count>=8 && Reff_span>=1.0;
+    const bool reliable=count>=8 && kpc_span>=2.0;
     const std::string status=count<2 ? "no gradient fit" :
         count<8 ? "descriptive: fewer than 8 unique regions" :
-        Reff_span<1.0 ? "descriptive: radial span below 1 Re" :
-        Reff_limits.first>1.0 ? "fit-grade: outer-disk coverage" : "fit-grade";
+        kpc_span<2.0 ? "descriptive: radial span below 2 kpc" : "fit-grade";
 
-    return {
-        galaxy,calibration_name(calibration),curve.family,curve.id,
-        static_cast<int>(observations.size()),static_cast<int>(unique_observations.size()),count,count,
-        kpc_limits.first,kpc_limits.second,Reff_limits.first,Reff_limits.second,
-        R25_limits.second-R25_limits.first,reliable,status,
-        observed_kpc.slope,observed_kpc.e_slope,observed_Reff.slope,observed_Reff.e_slope,
-        model_kpc.slope,model_Reff.slope,residual_fit.intercept,residual_fit.e_intercept,
-        residual_fit.slope,residual_fit.e_slope,pivot,offset,std::sqrt(1.0/weight_sum),
-        std::sqrt(residual_square_sum/static_cast<double>(count)),
-        std::sqrt(centered_square_sum/static_cast<double>(count)),chi2_fixed,
-        chi2_fixed/static_cast<double>(count),chi2_offset,
-        count>1 ? std::optional<double>(chi2_offset/static_cast<double>(count-1)) : std::nullopt,
-        abundance_scatter_dex,metadata.Reff_kpc,metadata.Z_outer_boundary,
-        metadata.R_Z_boundary_kpc,metadata.radial_H2_available,metadata.H2_treatment
-    };
+    FitStatistics result{};
+    result.galaxy=galaxy;
+    result.calibration=calibration_name(calibration);
+    result.model_family=curve.family;
+    result.model_curve=curve.id;
+    result.n_catalog_usable=static_cast<int>(observations.size());
+    result.n_unique_catalog_regions=static_cast<int>(unique_observations.size());
+    result.n_model_overlap=count;
+    result.n_unique_model_overlap=count;
+    result.R_min_kpc=kpc_limits.first;
+    result.R_max_kpc=kpc_limits.second;
+    result.R_span_kpc=kpc_span;
+    result.gradient_sample_reliable=reliable;
+    result.fit_status=status;
+    result.observed_slope_dex_per_kpc=observed_kpc.slope;
+    result.e_observed_slope_dex_per_kpc=observed_kpc.e_slope;
+    result.model_slope_dex_per_kpc=model_kpc.slope;
+    result.residual_offset_at_pivot_dex=residual_fit.intercept;
+    result.e_residual_offset_at_pivot_dex=residual_fit.e_intercept;
+    result.residual_slope_dex_per_kpc=residual_fit.slope;
+    result.e_residual_slope_dex_per_kpc=residual_fit.e_slope;
+    result.pivot_kpc=pivot;
+    result.weighted_mean_residual_dex=offset;
+    result.e_weighted_mean_residual_dex=std::sqrt(1.0/weight_sum);
+    result.rms_residual_dex=std::sqrt(residual_square_sum/static_cast<double>(count));
+    result.shape_rms_after_offset_dex=std::sqrt(centered_square_sum/static_cast<double>(count));
+    result.chi2_fixed_model=chi2_fixed;
+    result.reduced_chi2_fixed_model=chi2_fixed/static_cast<double>(count);
+    result.chi2_after_offset=chi2_offset;
+    result.reduced_chi2_after_offset=count>1 ?
+        std::optional<double>(chi2_offset/static_cast<double>(count-1)) : std::nullopt;
+    result.abundance_scatter_added_dex=abundance_scatter_dex;
+    result.Z_outer_boundary=metadata.Z_outer_boundary;
+    result.R_Z_boundary_kpc=metadata.R_Z_boundary_kpc;
+    result.radial_H2_available=metadata.radial_H2_available;
+    result.H2_treatment=metadata.H2_treatment;
+    return result;
 }
 
 FitStatistics unavailable_statistics(

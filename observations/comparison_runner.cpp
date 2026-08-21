@@ -18,17 +18,17 @@
 
 namespace {
 
-using CsvRow=galacticwind::csv::Row;
-using CsvTable=galacticwind::csv::Table;
-using galacticwind::csv::escape;
-using galacticwind::csv::number;
-using galacticwind::csv::read;
-using galacticwind::csv::value;
+using CsvRow=galactic_nuclear_fountain::csv::Row;
+using CsvTable=galactic_nuclear_fountain::csv::Table;
+using galactic_nuclear_fountain::csv::escape;
+using galactic_nuclear_fountain::csv::number;
+using galactic_nuclear_fountain::csv::read;
+using galactic_nuclear_fountain::csv::value;
 
 struct ModelRun {
-    std::vector<galacticwind::ModelCurve> curves;
-    std::vector<galacticwind::ModelCurve> references;
-    galacticwind::ComparisonMetadata metadata;
+    std::vector<galactic_nuclear_fountain::ModelCurve> curves;
+    std::vector<galactic_nuclear_fountain::ModelCurve> references;
+    galactic_nuclear_fountain::ComparisonMetadata metadata;
 };
 
 std::optional<double> optional_double(const std::string& text){
@@ -47,47 +47,27 @@ bool csv_bool(const CsvRow& row,const std::string& name){
     return text=="true" || text=="TRUE" || text=="1";
 }
 
-galacticwind::AbundanceMeasurement read_abundance(const CsvRow& row,const std::string& calibration){
+galactic_nuclear_fountain::AbundanceMeasurement read_abundance(const CsvRow& row,const std::string& calibration){
     return {
         csv_bool(row,"usable_OH12_"+calibration),
         optional_double(value(row,"OH12_"+calibration+"_dex")),
-        optional_double(value(row,"e_OH12_"+calibration+"_dex")),
-        optional_double(value(row,"Z_"+calibration+"_scaled_solar")),
-        optional_double(value(row,"e_lo_Z_"+calibration+"_scaled_solar")),
-        optional_double(value(row,"e_hi_Z_"+calibration+"_scaled_solar"))
+        optional_double(value(row,"e_OH12_"+calibration+"_dex"))
     };
 }
 
-std::vector<galacticwind::CatalogRow> read_catalog(const std::filesystem::path& path){
+std::vector<galactic_nuclear_fountain::CatalogRow> read_catalog(const std::filesystem::path& path){
     const CsvTable table=read(path);
-    std::vector<galacticwind::CatalogRow> catalog;
+    std::vector<galactic_nuclear_fountain::CatalogRow> catalog;
     catalog.reserve(table.rows.size());
     for (const CsvRow& row: table.rows) {
         catalog.push_back({
             value(row,"galaxy"),csv_int(row,"source_seq"),value(row,"hii_region"),
             optional_double(value(row,"offRA_arcsec")),optional_double(value(row,"offDE_arcsec")),
-            optional_double(value(row,"R_R25")),optional_double(value(row,"R_adopted_kpc")),
-            optional_double(value(row,"R_Reff_adopted")),
-            optional_double(value(row,"Reff_adopted_kpc")),
+            optional_double(value(row,"R_adopted_kpc")),
             read_abundance(row,"KK04"),read_abundance(row,"PT05")
         });
     }
     return catalog;
-}
-
-double adopted_reff(const std::vector<galacticwind::CatalogRow>& catalog,const std::string& galaxy){
-    std::optional<double> result;
-    for (const galacticwind::CatalogRow& row: catalog) {
-        if (row.galaxy!=galaxy || !row.Reff_kpc) {
-            continue;
-        }
-        result=*row.Reff_kpc;
-        break;
-    }
-    if (!result) {
-        throw std::runtime_error("Missing Reff for "+galaxy);
-    }
-    return *result;
 }
 
 std::vector<const CsvRow*> rows_for_source(const CsvTable& profiles,const std::string& source){
@@ -103,7 +83,7 @@ std::vector<const CsvRow*> rows_for_source(const CsvTable& profiles,const std::s
     return rows;
 }
 
-galacticwind::ModelCurve make_curve(
+galactic_nuclear_fountain::ModelCurve make_curve(
     const CsvTable& profiles,
     const std::string& source,
     const std::string& value_column,
@@ -112,7 +92,7 @@ galacticwind::ModelCurve make_curve(
     const std::string& label,
     const std::string& role
 ){
-    galacticwind::ModelCurve curve{family,id,label,role,{},{}};
+    galactic_nuclear_fountain::ModelCurve curve{family,id,label,role,{},{}};
     for (const CsvRow* row: rows_for_source(profiles,source)) {
         const double radius=number(*row,"R_kpc");
         const std::optional<double> profile_value=optional_double(value(*row,value_column));
@@ -130,8 +110,7 @@ galacticwind::ModelCurve make_curve(
 ModelRun load_model_run(
     const std::filesystem::path& root,
     const std::string& galaxy,
-    const std::string& family,
-    double Reff_kpc
+    const std::string& family
 ){
     const std::filesystem::path directory=root/galaxy;
     const std::filesystem::path profiles_path=directory/"profiles.csv";
@@ -146,27 +125,23 @@ ModelRun load_model_run(
 
     ModelRun run{
         {},{},
-        {Reff_kpc,Z_boundary,R_Z_boundary,csv_bool(metadata,"radial_H2_available"),
+        {Z_boundary,R_Z_boundary,csv_bool(metadata,"radial_H2_available"),
          value(metadata,"H2_treatment")}
     };
     if (family=="forward") {
         run.curves.push_back(make_curve(
-            profiles,"Leroy_THINGS","Z","forward","forward_leroy",
-            "forward: Leroy/THINGS","prediction"
-        ));
-        run.curves.push_back(make_curve(
-            profiles,"SPARC_corrected_fit","Z","forward","forward_sparc_fit",
-            "forward: SPARC fit","prediction"
+            profiles,"SPARC_spline","Z","forward","forward_sparc_spline",
+            "forward: SPARC spline","prediction"
         ));
         return run;
     }
     run.references.push_back(make_curve(
-        profiles,"Leroy_THINGS","Z_eq","inverse","inverse_local_equilibrium",
+        profiles,"SPARC_spline","Z_eq","inverse","inverse_local_equilibrium",
         "local-equilibrium reference","reference"
     ));
     if (solved) {
         run.curves.push_back(make_curve(
-            profiles,"Leroy_THINGS","Z","inverse","inverse_dynamics",
+            profiles,"SPARC_spline","Z","inverse","inverse_dynamics",
             "inverse-dynamics prediction","prediction"
         ));
     }
@@ -197,48 +172,49 @@ std::ofstream output_stream(const std::filesystem::path& path){
 
 void write_fit_summary(
     const std::filesystem::path& path,
-    const std::vector<galacticwind::FitStatistics>& statistics
+    const std::vector<galactic_nuclear_fountain::FitStatistics>& statistics
 ){
     std::ofstream stream=output_stream(path);
     write_row(stream,{
         "galaxy","calibration","model_family","model_curve","n_catalog_usable",
         "n_unique_catalog_regions","n_model_overlap","n_unique_model_overlap","R_min_kpc",
-        "R_max_kpc","R_min_Reff","R_max_Reff","R_R25_span","gradient_sample_reliable",
-        "fit_status","observed_slope_dex_per_kpc","e_observed_slope_dex_per_kpc",
-        "observed_slope_dex_per_Reff","e_observed_slope_dex_per_Reff",
-        "model_slope_dex_per_kpc","model_slope_dex_per_Reff","residual_offset_at_pivot_dex",
-        "e_residual_offset_at_pivot_dex","residual_slope_dex_per_Reff",
-        "e_residual_slope_dex_per_Reff","pivot_Reff","weighted_mean_residual_dex",
-        "e_weighted_mean_residual_dex","rms_residual_dex","shape_rms_after_offset_dex",
+        "R_max_kpc","R_span_kpc","gradient_sample_reliable",
+        "fit_status","observed_OH12_slope_dex_per_kpc","e_observed_OH12_slope_dex_per_kpc",
+        "model_OH12_slope_dex_per_kpc",
+        "OH12_residual_offset_at_pivot_dex","e_OH12_residual_offset_at_pivot_dex",
+        "OH12_residual_slope_dex_per_kpc","e_OH12_residual_slope_dex_per_kpc",
+        "pivot_kpc","weighted_mean_OH12_residual_dex",
+        "e_weighted_mean_OH12_residual_dex","rms_OH12_residual_dex",
+        "OH12_shape_rms_after_offset_dex",
         "chi2_fixed_model","reduced_chi2_fixed_model","chi2_after_offset",
-        "reduced_chi2_after_offset","abundance_scatter_added_dex","Reff_adopted_kpc",
-        "Z_outer_boundary","R_Z_boundary_kpc","radial_H2_available","H2_treatment"
+        "reduced_chi2_after_offset","abundance_scatter_added_dex",
+        "Z_outer_boundary","model_OH12_outer_boundary","R_Z_boundary_kpc",
+        "radial_H2_available","H2_treatment"
     });
-    for (const galacticwind::FitStatistics& row: statistics) {
+    for (const galactic_nuclear_fountain::FitStatistics& row: statistics) {
         write_row(stream,{
             row.galaxy,row.calibration,row.model_family,row.model_curve,
             std::to_string(row.n_catalog_usable),std::to_string(row.n_unique_catalog_regions),
             std::to_string(row.n_model_overlap),std::to_string(row.n_unique_model_overlap),
             format_optional(row.R_min_kpc),format_optional(row.R_max_kpc),
-            format_optional(row.R_min_Reff),format_optional(row.R_max_Reff),
-            format_optional(row.R_R25_span),row.gradient_sample_reliable ? "true" : "false",
+            format_optional(row.R_span_kpc),row.gradient_sample_reliable ? "true" : "false",
             row.fit_status,format_optional(row.observed_slope_dex_per_kpc),
             format_optional(row.e_observed_slope_dex_per_kpc),
-            format_optional(row.observed_slope_dex_per_Reff),
-            format_optional(row.e_observed_slope_dex_per_Reff),
-            format_optional(row.model_slope_dex_per_kpc),format_optional(row.model_slope_dex_per_Reff),
+            format_optional(row.model_slope_dex_per_kpc),
             format_optional(row.residual_offset_at_pivot_dex),
             format_optional(row.e_residual_offset_at_pivot_dex),
-            format_optional(row.residual_slope_dex_per_Reff),
-            format_optional(row.e_residual_slope_dex_per_Reff),format_optional(row.pivot_Reff),
+            format_optional(row.residual_slope_dex_per_kpc),
+            format_optional(row.e_residual_slope_dex_per_kpc),format_optional(row.pivot_kpc),
             format_optional(row.weighted_mean_residual_dex),
             format_optional(row.e_weighted_mean_residual_dex),format_optional(row.rms_residual_dex),
             format_optional(row.shape_rms_after_offset_dex),format_optional(row.chi2_fixed_model),
             format_optional(row.reduced_chi2_fixed_model),format_optional(row.chi2_after_offset),
             format_optional(row.reduced_chi2_after_offset),format_double(row.abundance_scatter_added_dex),
-            format_double(row.Reff_adopted_kpc),format_double(row.Z_outer_boundary),
-            format_double(row.R_Z_boundary_kpc),row.radial_H2_available ? "true" : "false",
-            row.H2_treatment
+            format_double(row.Z_outer_boundary),
+            format_double(galactic_nuclear_fountain::oxygen_abundance_from_metallicity(
+                row.Z_outer_boundary
+            )),format_double(row.R_Z_boundary_kpc),
+            row.radial_H2_available ? "true" : "false",row.H2_treatment
         });
     }
 }
@@ -247,28 +223,27 @@ void write_observation(
     std::ofstream& stream,
     const std::string& galaxy,
     const std::string& calibration,
-    const galacticwind::Observation& observation
+    const galactic_nuclear_fountain::Observation& observation
 ){
     write_row(stream,{
         galaxy,calibration,std::to_string(observation.source_sequence),observation.hii_region,
-        format_double(observation.R_R25),format_double(observation.R_kpc),
-        format_double(observation.R_Reff),format_double(observation.OH12),
-        format_double(observation.e_OH12),format_double(observation.Z),
-        format_double(observation.e_Z_lo),format_double(observation.e_Z_hi)
+        format_double(observation.R_kpc),format_double(observation.OH12),
+        format_double(observation.e_OH12)
     });
 }
 
 void write_curve(
     std::ofstream& stream,
     const std::string& galaxy,
-    const galacticwind::ModelCurve& curve,
-    double Reff_kpc
+    const galactic_nuclear_fountain::ModelCurve& curve
 ){
     for (std::size_t index=0; index<curve.radius_kpc.size(); ++index) {
         write_row(stream,{
             galaxy,curve.family,curve.id,curve.role,curve.label,
-            format_double(curve.radius_kpc[index]),format_double(curve.radius_kpc[index]/Reff_kpc),
-            format_double(curve.metallicity[index])
+            format_double(curve.radius_kpc[index]),
+            format_double(galactic_nuclear_fountain::oxygen_abundance_from_metallicity(
+                curve.metallicity[index]
+            ))
         });
     }
 }
@@ -277,13 +252,12 @@ void write_residual(
     std::ofstream& stream,
     const std::string& galaxy,
     const std::string& calibration,
-    const galacticwind::ModelCurve& curve,
-    const galacticwind::ResidualPoint& point
+    const galactic_nuclear_fountain::ModelCurve& curve,
+    const galactic_nuclear_fountain::ResidualPoint& point
 ){
     write_row(stream,{
         galaxy,calibration,curve.family,curve.id,std::to_string(point.observation.source_sequence),
-        format_double(point.observation.R_kpc),format_double(point.observation.R_Reff),
-        format_double(point.model_log_Z_Zsun),format_double(point.residual_dex),
+        format_double(point.observation.R_kpc),format_double(point.model_OH12),format_double(point.residual_dex),
         format_double(point.sigma_dex)
     });
 }
@@ -293,7 +267,7 @@ void write_residual(
 int main(int argc,char** argv){
     try {
         if (argc!=6) {
-            std::cerr << "Usage: galacticwind_compare <galaxy|all> <sings-catalog.csv> <forward-root> <inverse-root> <output-directory>\n";
+            std::cerr << "Usage: galactic-nuclear-fountain-compare <galaxy|all> <sings-catalog.csv> <forward-root> <inverse-root> <output-directory>\n";
             return 2;
         }
         const std::string requested=argv[1];
@@ -301,10 +275,10 @@ int main(int argc,char** argv){
         const std::filesystem::path forward_root=argv[3];
         const std::filesystem::path inverse_root=argv[4];
         const std::filesystem::path output_directory=argv[5];
-        const std::vector<galacticwind::CatalogRow> catalog=read_catalog(catalog_path);
+        const std::vector<galactic_nuclear_fountain::CatalogRow> catalog=read_catalog(catalog_path);
 
         std::set<std::string> available;
-        for (const galacticwind::CatalogRow& row: catalog) {
+        for (const galactic_nuclear_fountain::CatalogRow& row: catalog) {
             available.insert(row.galaxy);
         }
         std::vector<std::string> galaxies;
@@ -322,62 +296,60 @@ int main(int argc,char** argv){
         std::ofstream curve_stream=output_stream(output_directory/"model_curves.csv");
         std::ofstream residual_stream=output_stream(output_directory/"residuals.csv");
         write_row(observation_stream,{
-            "galaxy","calibration","source_seq","hii_region","R_R25","R_kpc","R_Reff",
-            "OH12","e_OH12","Z","e_Z_lo","e_Z_hi"
+            "galaxy","calibration","source_seq","hii_region","R_kpc","OH12","e_OH12"
         });
         write_row(curve_stream,{
-            "galaxy","model_family","model_curve","curve_role","label","R_kpc","R_Reff","Z"
+            "galaxy","model_family","model_curve","curve_role","label","R_kpc","model_OH12"
         });
         write_row(residual_stream,{
-            "galaxy","calibration","model_family","model_curve","source_seq","R_kpc","R_Reff",
-            "model_log_Z_Zsun","residual_dex","sigma_dex"
+            "galaxy","calibration","model_family","model_curve","source_seq","R_kpc",
+            "model_OH12","OH12_residual_dex","sigma_OH12_dex"
         });
-        std::vector<galacticwind::FitStatistics> statistics;
-        const std::vector<galacticwind::Calibration> calibrations={
-            galacticwind::Calibration::KK04,galacticwind::Calibration::PT05
+        std::vector<galactic_nuclear_fountain::FitStatistics> statistics;
+        const std::vector<galactic_nuclear_fountain::Calibration> calibrations={
+            galactic_nuclear_fountain::Calibration::KK04,galactic_nuclear_fountain::Calibration::PT05
         };
 
         for (const std::string& galaxy: galaxies) {
-            const double Reff=adopted_reff(catalog,galaxy);
-            const ModelRun forward=load_model_run(forward_root,galaxy,"forward",Reff);
-            const ModelRun inverse=load_model_run(inverse_root,galaxy,"inverse",Reff);
-            for (const galacticwind::ModelCurve& curve: forward.curves) {
-                write_curve(curve_stream,galaxy,curve,Reff);
+            const ModelRun forward=load_model_run(forward_root,galaxy,"forward");
+            const ModelRun inverse=load_model_run(inverse_root,galaxy,"inverse");
+            for (const galactic_nuclear_fountain::ModelCurve& curve: forward.curves) {
+                write_curve(curve_stream,galaxy,curve);
             }
-            for (const galacticwind::ModelCurve& curve: inverse.curves) {
-                write_curve(curve_stream,galaxy,curve,Reff);
+            for (const galactic_nuclear_fountain::ModelCurve& curve: inverse.curves) {
+                write_curve(curve_stream,galaxy,curve);
             }
-            for (const galacticwind::ModelCurve& curve: inverse.references) {
-                write_curve(curve_stream,galaxy,curve,Reff);
+            for (const galactic_nuclear_fountain::ModelCurve& curve: inverse.references) {
+                write_curve(curve_stream,galaxy,curve);
             }
 
-            for (const galacticwind::Calibration calibration: calibrations) {
-                const std::string calibration_text=galacticwind::calibration_name(calibration);
-                const std::vector<galacticwind::Observation> observations=
-                    galacticwind::select_observations(catalog,galaxy,calibration);
-                for (const galacticwind::Observation& observation: observations) {
+            for (const galactic_nuclear_fountain::Calibration calibration: calibrations) {
+                const std::string calibration_text=galactic_nuclear_fountain::calibration_name(calibration);
+                const std::vector<galactic_nuclear_fountain::Observation> observations=
+                    galactic_nuclear_fountain::select_observations(catalog,galaxy,calibration);
+                for (const galactic_nuclear_fountain::Observation& observation: observations) {
                     write_observation(observation_stream,galaxy,calibration_text,observation);
                 }
-                for (const galacticwind::ModelCurve& curve: forward.curves) {
-                    statistics.push_back(galacticwind::comparison_statistics(
+                for (const galactic_nuclear_fountain::ModelCurve& curve: forward.curves) {
+                    statistics.push_back(galactic_nuclear_fountain::comparison_statistics(
                         galaxy,calibration,observations,curve,forward.metadata
                     ));
-                    for (const galacticwind::ResidualPoint& residual:
-                         galacticwind::overlap_residuals(observations,curve)) {
+                    for (const galactic_nuclear_fountain::ResidualPoint& residual:
+                         galactic_nuclear_fountain::overlap_residuals(observations,curve)) {
                         write_residual(residual_stream,galaxy,calibration_text,curve,residual);
                     }
                 }
                 if (inverse.curves.empty()) {
-                    statistics.push_back(galacticwind::unavailable_statistics(
+                    statistics.push_back(galactic_nuclear_fountain::unavailable_statistics(
                         galaxy,calibration,observations,inverse.metadata
                     ));
                 } else {
-                    const galacticwind::ModelCurve& curve=inverse.curves.front();
-                    statistics.push_back(galacticwind::comparison_statistics(
+                    const galactic_nuclear_fountain::ModelCurve& curve=inverse.curves.front();
+                    statistics.push_back(galactic_nuclear_fountain::comparison_statistics(
                         galaxy,calibration,observations,curve,inverse.metadata
                     ));
-                    for (const galacticwind::ResidualPoint& residual:
-                         galacticwind::overlap_residuals(observations,curve)) {
+                    for (const galactic_nuclear_fountain::ResidualPoint& residual:
+                         galactic_nuclear_fountain::overlap_residuals(observations,curve)) {
                         write_residual(residual_stream,galaxy,calibration_text,curve,residual);
                     }
                 }
@@ -394,7 +366,7 @@ int main(int argc,char** argv){
         std::cout << "Wrote comparison CSV output to " << output_directory << '\n';
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "galacticwind_compare: " << error.what() << '\n';
+        std::cerr << "galactic-nuclear-fountain-compare: " << error.what() << '\n';
         return 1;
     }
 }

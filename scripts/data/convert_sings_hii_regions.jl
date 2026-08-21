@@ -26,8 +26,6 @@ const OUTPUT_FILE = joinpath(INPUT, "sings_hii_regions.csv")
 const COVERAGE_FILE = joinpath(INPUT, "sings_hii_coverage.csv")
 
 const CDS_BASE = "https://cdsarc.cds.unistra.fr/ftp/J/ApJS/190/233"
-const OH12_SUN = 8.69
-const Z_SUN = 0.0139
 const RAW_FILES = Dict(
     TABLE10_FILE => "$(CDS_BASE)/table10.dat",
     TABLE1_FILE => "$(CDS_BASE)/table1.dat",
@@ -35,38 +33,28 @@ const RAW_FILES = Dict(
     README_FILE => "$(CDS_BASE)/ReadMe",
 )
 
-# The complete SPARC/THINGS/Leroy overlap. Moustakas et al. (2010) contains
-# point measurements for eleven of these thirteen galaxies.
+# The analysis sample is the Q=1 SPARC/THINGS/Leroy overlap restricted to
+# galaxies with Moustakas et al. (2010) H II-region metallicity measurements.
 const SAMPLE_GALAXIES = [
-    "DDO154",
-    "IC2574",
     "NGC2403",
     "NGC2841",
-    "NGC2976",
     "NGC3198",
     "NGC3521",
-    "NGC4214",
     "NGC5055",
     "NGC6946",
     "NGC7331",
     "NGC7793",
-    "UGC4305",
 ]
 
 const EXPECTED_COUNTS = Dict(
-    "DDO154" => 4,
-    "IC2574" => 21,
     "NGC2403" => 46,
     "NGC2841" => 5,
-    "NGC2976" => 0,
     "NGC3198" => 14,
     "NGC3521" => 13,
-    "NGC4214" => 0,
     "NGC5055" => 5,
     "NGC6946" => 8,
     "NGC7331" => 10,
     "NGC7793" => 12,
-    "UGC4305" => 21,
 )
 
 
@@ -219,24 +207,6 @@ function physical_radius_kpc(angle_arcmin, distance_Mpc)
 end
 
 
-"""Convert 12 + log10(O/H) to total Z under a scaled-solar abundance pattern."""
-function oxygen_abundance_to_Z(OH12)
-    ismissing(OH12) && return missing
-    return Z_SUN * 10.0^(OH12 - OH12_SUN)
-end
-
-
-"""Convert a symmetric dex error into exact asymmetric errors in linear Z."""
-function oxygen_abundance_to_Z_with_errors(OH12, e_OH12)
-    Z = oxygen_abundance_to_Z(OH12)
-    any(ismissing, (Z, e_OH12)) && return (Z=Z, e_Z_lo=missing, e_Z_hi=missing)
-
-    Z_low = oxygen_abundance_to_Z(OH12 - e_OH12)
-    Z_high = oxygen_abundance_to_Z(OH12 + e_OH12)
-    return (Z=Z, e_Z_lo=Z - Z_low, e_Z_hi=Z_high - Z)
-end
-
-
 function add_metadata(hii, sings_galaxies, references, local_galaxies)
     local_by_galaxy = Dict(
         string(row.galaxy) => NamedTuple(row) for row in eachrow(local_galaxies)
@@ -256,21 +226,8 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
         )
         R_sings_kpc = ismissing(row.R_R25) ? missing : row.R_R25 * R25_sings_kpc
 
-        distance_scale = adopted.D_leroy_Mpc / adopted.D_sparc_Mpc
-        Reff_adopted_kpc = adopted.Reff_sparc_kpc * distance_scale
         R_adopted_kpc = ismissing(row.R_R25) ?
             missing : row.R_R25 * adopted.R25_leroy_kpc
-        R_Reff_adopted = ismissing(R_adopted_kpc) ?
-            missing : R_adopted_kpc / Reff_adopted_kpc
-        Z_KK04 = oxygen_abundance_to_Z_with_errors(
-            row.OH12_KK04_dex,
-            row.e_OH12_KK04_dex,
-        )
-        Z_PT05 = oxygen_abundance_to_Z_with_errors(
-            row.OH12_PT05_dex,
-            row.e_OH12_PT05_dex,
-        )
-
         push!(rows, (
             galaxy = row.galaxy,
             name_sings = row.name_sings,
@@ -279,7 +236,6 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
             R_R25 = row.R_R25,
             R_sings_kpc = R_sings_kpc,
             R_adopted_kpc = R_adopted_kpc,
-            R_Reff_adopted = R_Reff_adopted,
             D_sings_Mpc = survey.D_sings_Mpc,
             R25_sings_arcmin = survey.R25_sings_arcmin,
             R25_sings_kpc = R25_sings_kpc,
@@ -288,8 +244,6 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
             D_adopted_Mpc = adopted.D_leroy_Mpc,
             D_sparc_Mpc = adopted.D_sparc_Mpc,
             R25_adopted_kpc = adopted.R25_leroy_kpc,
-            Reff_sparc_kpc = adopted.Reff_sparc_kpc,
-            Reff_adopted_kpc = Reff_adopted_kpc,
             R23 = row.R23,
             e_R23 = row.e_R23,
             O32 = row.O32,
@@ -300,18 +254,10 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
             e_OH12_KK04_dex = row.e_OH12_KK04_dex,
             flag_OH12_KK04 = row.flag_OH12_KK04,
             usable_OH12_KK04 = row.usable_OH12_KK04,
-            Z_KK04_scaled_solar = Z_KK04.Z,
-            e_lo_Z_KK04_scaled_solar = Z_KK04.e_Z_lo,
-            e_hi_Z_KK04_scaled_solar = Z_KK04.e_Z_hi,
             OH12_PT05_dex = row.OH12_PT05_dex,
             e_OH12_PT05_dex = row.e_OH12_PT05_dex,
             flag_OH12_PT05 = row.flag_OH12_PT05,
             usable_OH12_PT05 = row.usable_OH12_PT05,
-            Z_PT05_scaled_solar = Z_PT05.Z,
-            e_lo_Z_PT05_scaled_solar = Z_PT05.e_Z_lo,
-            e_hi_Z_PT05_scaled_solar = Z_PT05.e_Z_hi,
-            OH12_sun_assumed_dex = OH12_SUN,
-            Z_sun_assumed = Z_SUN,
             reference_id = row.reference_id,
             reference_bibcode = reference.reference_bibcode,
             reference_authors = reference.reference_authors,
@@ -360,7 +306,9 @@ end
 function validate_catalog(raw, sample, coverage)
     nrow(raw) == 561 || error("Expected 561 rows in table10.dat; found $(nrow(raw))")
     allunique(raw.source_seq) || error("SINGS source sequence numbers are not unique")
-    nrow(sample) == 159 || error("Expected 159 matched rows; found $(nrow(sample))")
+    expected_sample_rows = sum(values(EXPECTED_COUNTS))
+    nrow(sample) == expected_sample_rows ||
+        error("Expected $expected_sample_rows matched rows; found $(nrow(sample))")
 
     counts = Dict(row.galaxy => row.n_rows for row in eachrow(coverage))
     counts == EXPECTED_COUNTS || error("Unexpected matched-galaxy row counts: $counts")
@@ -383,10 +331,6 @@ function main()
     sings_galaxies = read_sings_galaxies(TABLE1_FILE)
     references = read_references(REFS_FILE)
     local_galaxies = CSV.read(LOCAL_GALAXIES_FILE, DataFrame)
-
-    :Reff_sparc_kpc in propertynames(local_galaxies) || error(
-        "Reff_sparc_kpc is missing. Run scripts/data/concatenate_galaxy_catalogs.jl first.",
-    )
 
     sample = add_metadata(raw, sings_galaxies, references, local_galaxies)
     coverage = make_coverage(sample)

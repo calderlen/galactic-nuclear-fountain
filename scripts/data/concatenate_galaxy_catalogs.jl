@@ -9,10 +9,33 @@ const SPARC_RC_FILE = joinpath(INPUT, "sparc", "MassModels_Lelli2016c.mrt")
 const THINGS_FILE = joinpath(INPUT, "things", "Galaxies.dat")
 const LEROY_FILE = joinpath(INPUT, "leroy2008", "GlobalGalaxyQuantities.dat")
 const LEROY_RADIAL = joinpath(INPUT, "leroy2008", "RadialBins.dat")
+const BIGIEL_RADIAL = joinpath(INPUT, "bigiel2010", "RadialProfiles.csv")
 
 const OUTDIR = INPUT
 
 const ALIASES = Dict("HOI"  => "UGC5139", "HOII" => "UGC4305") # necessary because 
+# Leroy et al. (2008) derive their spiral-galaxy H2 columns from HERACLES
+# CO(2-1), with BIMA SONG/other CO used outside this target list.
+const HERACLES_GALAXIES = Set([
+    "DDO154",
+    "UGC5139",
+    "UGC4305",
+    "IC2574",
+    "NGC628",
+    "NGC925",
+    "NGC2841",
+    "NGC2903",
+    "NGC2976",
+    "NGC3184",
+    "NGC3198",
+    "NGC3351",
+    "NGC3521",
+    "NGC4214",
+    "NGC4736",
+    "NGC5055",
+    "NGC6946",
+    "NGC7331",
+])
 
 function normalize_name(name)
     s = uppercase(replace(strip(name), r"[\s,-]" => ""))
@@ -182,22 +205,26 @@ function read_leroy_radial(path)
         ismissing(R) && continue
 
         name = field(line, 1, 8)
+        galaxy = normalize_name(name)
 
         sfr = floatfield(line, 56, 61)
         e_sfr = floatfield(line, 63, 68)
         sfr_fuv = floatfield(line, 70, 75)
         sfr_24 = floatfield(line, 77, 82)
+        sigma_H2 = floatfield(line, 30, 35)
 
         push!(rows, (
-            galaxy = normalize_name(name),
+            galaxy = galaxy,
             R_kpc = R,
             R_R25 = floatfield(line, 15, 18),
 
             SigmaHI_Msun_pc2 = floatfield(line, 20, 24),
             e_SigmaHI_Msun_pc2 = floatfield(line, 26, 28),
 
-            SigmaH2_Msun_pc2 = floatfield(line, 30, 35),
+            SigmaH2_Msun_pc2 = sigma_H2,
             e_SigmaH2_Msun_pc2 = floatfield(line, 37, 40),
+            SigmaH2_source = ismissing(sigma_H2) ? missing :
+                galaxy in HERACLES_GALAXIES ? "HERACLES" : "BIMA_SONG_or_other",
 
             SigmaStar_Msun_pc2 = floatfield(line, 42, 48),
             e_SigmaStar_Msun_pc2 = floatfield(line, 50, 54),
@@ -219,9 +246,31 @@ function read_leroy_radial(path)
     DataFrame(rows)
 end
 
+function read_bigiel_radial(path)
+    radial = CSV.read(path, DataFrame)
+    required = [
+        :galaxy,
+        :R_R25,
+        :SigmaHI_Msun_pc2,
+        :e_SigmaHI_Msun_pc2,
+        :SigmaSFR_Msun_yr_kpc2,
+        :e_SigmaSFR_stat_Msun_yr_kpc2,
+        :e_SigmaSFR_Msun_yr_kpc2,
+    ]
+    missing_columns = setdiff(required, propertynames(radial))
+    isempty(missing_columns) ||
+        error("Bigiel radial table is missing columns: $(join(missing_columns, ", "))")
+
+    radial.galaxy = normalize_name.(radial.galaxy)
+    all(radial.R_R25 .>= 1.0) ||
+        error("Bigiel radial table must contain only outer-disk points at R/R25 >= 1")
+    return radial
+end
+
 sparc = read_sparc(SPARC_FILE)
 things = read_things(THINGS_FILE)
 leroy = read_leroy(LEROY_FILE)
+bigiel_radial = read_bigiel_radial(BIGIEL_RADIAL)
 
 galaxies = outerjoin(sparc, things, on=:galaxy)
 galaxies = outerjoin(galaxies, leroy, on=:galaxy)
@@ -229,19 +278,23 @@ galaxies = outerjoin(galaxies, leroy, on=:galaxy)
 galaxies.in_sparc = .!ismissing.(galaxies.name_sparc)
 galaxies.in_things = .!ismissing.(galaxies.name_things)
 galaxies.in_leroy = .!ismissing.(galaxies.name_leroy)
+galaxies.in_bigiel2010 = in.(galaxies.galaxy, Ref(Set(bigiel_radial.galaxy)))
+galaxies.in_heracles = in.(galaxies.galaxy, Ref(HERACLES_GALAXIES))
 
 sort!(galaxies, :galaxy)
 
 triple = filter(
-    row -> row.in_sparc && row.in_things && row.in_leroy,
+    row -> row.in_sparc && row.in_things && row.in_leroy && row.Q_sparc == 1,
     galaxies,
 )
+all(triple.Q_sparc .== 1) || error("The overlap sample contains a SPARC galaxy with Q != 1")
 
 rotation_curves = read_sparc_rotation_curves(SPARC_RC_FILE)
 radial_profiles = read_leroy_radial(LEROY_RADIAL)
 
 sort!(rotation_curves, [:galaxy, :R_kpc])
 sort!(radial_profiles, [:galaxy, :R_kpc])
+sort!(bigiel_radial, [:galaxy, :R_R25])
 
 mkpath(OUTDIR)
 
@@ -249,3 +302,4 @@ CSV.write(joinpath(OUTDIR, "galaxies.csv"), galaxies)
 CSV.write(joinpath(OUTDIR, "galaxies_triple_overlap.csv"), triple)
 CSV.write(joinpath(OUTDIR, "sparc_rotation_curves.csv"), rotation_curves)
 CSV.write(joinpath(OUTDIR, "leroy_radial_profiles.csv"), radial_profiles)
+CSV.write(joinpath(OUTDIR, "bigiel_radial_profiles.csv"), bigiel_radial)

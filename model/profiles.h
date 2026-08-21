@@ -22,11 +22,6 @@ struct FlatRotationParameters {
     double velocity;
 };
 
-struct RisingRotationParameters {
-    double Vflat;
-    double lflat;
-};
-
 struct LinearProfile {
     std::vector<double> radius;
     std::vector<double> value;
@@ -34,7 +29,4 @@ struct LinearProfile {
 
 double flat_rotation_velocity(double R, const void* parameters);
 double flat_rotation_velocity_derivative(double R, const void* parameters);
-double rising_rotation_velocity(double R,const void* parameters);
-double rising_rotation_velocity_derivative(double R,const void* parameters);
 double linear_profile_value(double R,const void* parameters);
-double linear_profile_derivative(double R,const void* parameters);

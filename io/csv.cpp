@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace galacticwind::csv {
+namespace galactic_nuclear_fountain::csv {
 namespace {
 
 std::vector<std::string> parse_line(const std::string& line){

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace galacticwind::csv {
+namespace galactic_nuclear_fountain::csv {
 
 using Row=std::unordered_map<std::string,std::string>;
 

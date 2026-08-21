@@ -1,6 +1,6 @@
 CXX ?= c++
 CPPFLAGS ?= -Imodel -Iobservations -Iio
-CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -Wpedantic
+CXXFLAGS ?= -std=c++23 -O3 -Wall -Wextra -Wpedantic
 AR ?= ar
 ARFLAGS := rcs
 
@@ -9,9 +9,9 @@ MODEL_SOURCES := model/profiles.cpp model/physics.cpp model/models.cpp model/rk4
 MODEL_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(MODEL_SOURCES))
 HEADERS := model/profiles.h model/physics.h model/models.h model/rk4.h \
 	observations/comparison.h io/csv.h
-LIBRARY := $(BUILD_DIR)/libgalacticwind.a
-RUNNER := $(BUILD_DIR)/galacticwind_model
-COMPARISON := $(BUILD_DIR)/galacticwind_compare
+LIBRARY := $(BUILD_DIR)/libgalactic-nuclear-fountain.a
+RUNNER := $(BUILD_DIR)/galactic-nuclear-fountain-model
+COMPARISON := $(BUILD_DIR)/galactic-nuclear-fountain-compare
 RUNNER_OBJECTS := $(BUILD_DIR)/model/model_runner.o $(BUILD_DIR)/io/csv.o
 COMPARISON_OBJECTS := $(BUILD_DIR)/observations/comparison_runner.o \
 	$(BUILD_DIR)/observations/comparison.o $(BUILD_DIR)/io/csv.o

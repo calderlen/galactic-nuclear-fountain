@@ -2,7 +2,10 @@
 /LocalPreferences.toml
 /JuliaLocalPreferences.toml
 
-/input/
+/input/*
+!/input/bigiel2010/
+!/input/bigiel2010/README.md
+!/input/bigiel2010/RadialProfiles.csv
 /output/
 /build/
 

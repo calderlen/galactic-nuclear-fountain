@@ -20,19 +20,21 @@ namespace {
 
 constexpr double pi=3.14159265358979323846;
 constexpr double kpc_per_year_to_km_per_second=9.7779222168e8;
-using CsvRow=galacticwind::csv::Row;
-using CsvTable=galacticwind::csv::Table;
-using galacticwind::csv::escape;
-using galacticwind::csv::number;
-using galacticwind::csv::read;
-using galacticwind::csv::value;
+constexpr const char* primary_observational_rotation="SPARC_spline";
+using CsvRow=galactic_nuclear_fountain::csv::Row;
+using CsvTable=galactic_nuclear_fountain::csv::Table;
+using galactic_nuclear_fountain::csv::escape;
+using galactic_nuclear_fountain::csv::number;
+using galactic_nuclear_fountain::csv::read;
+using galactic_nuclear_fountain::csv::value;
 struct AnalyticProfileParameters {double R_g; double sigma_g0; double A; double N;};
 struct LandingProfileParameters {double Mdot_land; double R_nucl; double R_out;};
 struct RotationInput {
     std::string source;
     std::string kind;
     FlatRotationParameters flat;
-    RisingRotationParameters rising;
+    LinearProfile tabulated_velocity;
+    LinearProfile tabulated_derivative;
     double chi2;
     double dof;
     double reduced_chi2;
@@ -102,7 +104,6 @@ double parameter_double(const std::unordered_map<std::string,std::string>& param
 double parameter_double(const std::unordered_map<std::string,std::string>& parameters,const std::string& name){
     return std::stod(parameters.at(name));
 }
-
 std::vector<double> radial_grid(double start,double stop,std::size_t count){
     std::vector<double> grid(count);
     for (std::size_t index=0; index<count; ++index) {
@@ -140,35 +141,141 @@ RotationCurve make_rotation_curve(const RotationInput& input){
     if (input.kind=="flat") {
         return {{flat_rotation_velocity,&input.flat},{flat_rotation_velocity_derivative,&input.flat}};
     }
-    return {{rising_rotation_velocity,&input.rising},{rising_rotation_velocity_derivative,&input.rising}};
+    if (input.kind=="tabulated") {
+        return {{linear_profile_value,&input.tabulated_velocity},{linear_profile_value,&input.tabulated_derivative}};
+    }
+    throw std::runtime_error("Unknown rotation kind "+input.kind+" for "+input.source);
 }
 
-std::vector<RotationInput> read_rotations(const std::filesystem::path& path){
+void validate_tabulated_profile(const LinearProfile& profile,const std::string& description){
+    if (profile.radius.size()<2 || profile.radius.size()!=profile.value.size()) {
+        throw std::runtime_error(description+" needs at least two matched radius/value rows");
+    }
+    for (std::size_t index=0; index<profile.radius.size(); ++index) {
+        if (!std::isfinite(profile.radius[index]) || !std::isfinite(profile.value[index])) {
+            throw std::runtime_error(description+" contains non-finite values");
+        }
+        if (index>0 && profile.radius[index]<=profile.radius[index-1]) {
+            throw std::runtime_error(description+" radii must be strictly increasing");
+        }
+    }
+}
+
+void load_tabulated_rotations(const std::filesystem::path& path,std::vector<RotationInput>& rotations){
+    std::unordered_map<std::string,RotationInput*> tabulated;
+    for (RotationInput& rotation: rotations) {
+        if (rotation.kind=="tabulated") {
+            tabulated[rotation.source]=&rotation;
+        }
+    }
+    if (tabulated.empty()) {
+        return;
+    }
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error("Tabulated rotation curves require "+path.string());
+    }
+
+    const CsvTable table=read(path);
+    for (const CsvRow& row: table.rows) {
+        const std::string source=value(row,"source");
+        const auto match=tabulated.find(source);
+        if (match==tabulated.end()) {
+            continue;
+        }
+        RotationInput& rotation=*match->second;
+        const double radius=number(row,"R_kpc");
+        rotation.tabulated_velocity.radius.push_back(radius);
+        rotation.tabulated_velocity.value.push_back(number(row,"V_kms"));
+        rotation.tabulated_derivative.radius.push_back(radius);
+        rotation.tabulated_derivative.value.push_back(number(row,"dV_dR_kms_kpc"));
+    }
+    for (const auto& entry: tabulated) {
+        validate_tabulated_profile(entry.second->tabulated_velocity,entry.first+" velocity profile");
+        validate_tabulated_profile(entry.second->tabulated_derivative,entry.first+" derivative profile");
+    }
+}
+
+std::vector<RotationInput> read_rotations(const std::filesystem::path& path,const std::filesystem::path& profiles_path){
     const CsvTable table=read(path);
     std::vector<RotationInput> rotations;
     for (const CsvRow& row: table.rows) {
-        RotationInput input;
+        RotationInput input{};
         input.source=value(row,"source");
         input.kind=value(row,"kind");
-        input.flat.velocity=number(row,"Vflat_kms");
-        input.rising={input.flat.velocity,input.kind=="rising" ? number(row,"lflat_kpc") : 1.0};
+        if (input.kind=="flat") {
+            input.flat.velocity=number(row,"Vflat_kms");
+        } else if (input.kind!="tabulated") {
+            throw std::runtime_error("Unknown rotation kind "+input.kind+" for "+input.source);
+        }
         input.chi2=number(row,"chi2");
         input.dof=number(row,"dof");
         input.reduced_chi2=number(row,"reduced_chi2");
         rotations.push_back(input);
     }
+    if (rotations.empty()) {
+        throw std::runtime_error("No rotation curves found in "+path.string());
+    }
+    load_tabulated_rotations(profiles_path,rotations);
     return rotations;
 }
 
-void load_tabulated_profiles(const std::filesystem::path& path,LinearProfile& gas,LinearProfile& star){
+const RotationInput& primary_rotation(const std::vector<RotationInput>& rotations,const std::string& profile_type){
+    if (profile_type=="tabulated") {
+        const auto match=std::find_if(rotations.begin(),rotations.end(),[](const RotationInput& rotation){
+            return rotation.source==primary_observational_rotation;
+        });
+        if (match==rotations.end()) {
+            throw std::runtime_error(
+                std::string("Observational inputs require primary rotation source ")+
+                primary_observational_rotation
+            );
+        }
+        return *match;
+    }
+    return rotations.front();
+}
+
+void validate_rotation_support(const std::vector<RotationInput>& rotations,double R_nucl,double R_out){
+    for (const RotationInput& rotation: rotations) {
+        if (rotation.kind!="tabulated") {
+            continue;
+        }
+        const double lower=rotation.tabulated_velocity.radius.front();
+        const double upper=rotation.tabulated_velocity.radius.back();
+        if (R_nucl<lower || R_out>upper) {
+            throw std::runtime_error(
+                rotation.source+" support ["+std::to_string(lower)+", "+
+                std::to_string(upper)+"] kpc does not cover the model range"
+            );
+        }
+    }
+}
+
+void load_tabulated_star_profile(const std::filesystem::path& path,LinearProfile& star){
+    const CsvTable table=read(path);
+    for (const CsvRow& row: table.rows) {
+        const double radius=number(row,"R_kpc");
+        star.radius.push_back(radius);
+        star.value.push_back(number(row,"Sigmadot_star_Msun_yr_kpc2"));
+    }
+    validate_tabulated_profile(star,"Leroy star-formation profile");
+}
+
+void load_tabulated_gas_profiles(
+    const std::filesystem::path& path,
+    LinearProfile& gas,
+    LinearProfile& gas_derivative
+){
     const CsvTable table=read(path);
     for (const CsvRow& row: table.rows) {
         const double radius=number(row,"R_kpc");
         gas.radius.push_back(radius);
-        star.radius.push_back(radius);
         gas.value.push_back(number(row,"Sigma_g_Msun_kpc2"));
-        star.value.push_back(number(row,"Sigmadot_star_Msun_yr_kpc2"));
+        gas_derivative.radius.push_back(radius);
+        gas_derivative.value.push_back(number(row,"dSigma_g_dR_Msun_kpc3"));
     }
+    validate_tabulated_profile(gas,"Leroy gas spline");
+    validate_tabulated_profile(gas_derivative,"Leroy gas spline derivative");
 }
 
 void write_profiles(const std::filesystem::path& path,const std::vector<ModelResult>& results){
@@ -213,7 +320,7 @@ void copy_if_present(const std::filesystem::path& source,const std::filesystem::
 int main(int argc,char** argv){
     try {
         if (argc!=4) {
-            std::cerr << "Usage: galacticwind_model <forward|inverse> <input-directory> <output-directory>\n";
+            std::cerr << "Usage: galactic-nuclear-fountain-model <forward|inverse> <input-directory> <output-directory>\n";
             return 2;
         }
 
@@ -238,10 +345,15 @@ int main(int argc,char** argv){
         const double metallicity_atol=parameter_double(parameters,"metallicity_atol",1e-12);
         const std::size_t point_count=static_cast<std::size_t>(parameter_double(parameters,"n_points",300.0));
         const std::vector<double> grid=radial_grid(R_nucl,R_out,point_count);
-        const std::vector<RotationInput> rotations=read_rotations(input_directory/"rotation_curves.csv");
+        const std::vector<RotationInput> rotations=read_rotations(
+            input_directory/"rotation_curves.csv",
+            input_directory/"rotation_profiles.csv"
+        );
+        validate_rotation_support(rotations,R_nucl,R_out);
 
         AnalyticProfileParameters analytic_profiles{};
         LinearProfile tabulated_gas;
+        LinearProfile tabulated_gas_derivative;
         LinearProfile tabulated_star;
         RadialProfile gas;
         RadialProfile gas_derivative;
@@ -256,9 +368,14 @@ int main(int argc,char** argv){
             gas_derivative={analytic_gas_derivative,&analytic_profiles};
             star={analytic_star,&analytic_profiles};
         } else {
-            load_tabulated_profiles(input_directory/"profiles.csv",tabulated_gas,tabulated_star);
+            load_tabulated_gas_profiles(
+                input_directory/"gas_profiles.csv",
+                tabulated_gas,
+                tabulated_gas_derivative
+            );
+            load_tabulated_star_profile(input_directory/"profiles.csv",tabulated_star);
             gas={linear_profile_value,&tabulated_gas};
-            gas_derivative={linear_profile_derivative,&tabulated_gas};
+            gas_derivative={linear_profile_value,&tabulated_gas_derivative};
             star={linear_profile_value,&tabulated_star};
         }
 
@@ -268,7 +385,7 @@ int main(int argc,char** argv){
         double Mdot_out=raw_Mdot_out=="auto" ? std::numeric_limits<double>::quiet_NaN() : std::stod(raw_Mdot_out);
 
         if (model=="inverse" && std::isnan(Mdot_out)) {
-            const RotationCurve rot_curve=make_rotation_curve(rotations.front());
+            const RotationCurve rot_curve=make_rotation_curve(primary_rotation(rotations,profile_type));
             const ForwardModelParameters forward_parameters{R_nucl,R_out,mu,beta,gas,gas_derivative,star,rot_curve};
             const ForwardModelSolution forward_solution=solve_forward_model(forward_parameters,Mdot_land,h_0,dynamics_atol,rtol);
             Mdot_out=-2.0*pi*R_out*profile_value(gas,R_out)*forward_radial_velocity(R_out,forward_parameters,forward_solution);
@@ -421,12 +538,19 @@ int main(int argc,char** argv){
         write_summary(output_directory/"summary.csv",model,profile_type,galaxy,results,R_nucl,R_out,Mdot_land,Mdot_out,mu,beta,Z_nucl,Z_CGM,yield,Z_boundary,R_Z_boundary,metallicity_solved);
         copy_if_present(input_directory/"metadata.csv",output_directory/"metadata.csv");
         copy_if_present(input_directory/"rotation_curves.csv",output_directory/"rotation_curves.csv");
+        copy_if_present(input_directory/"rotation_profiles.csv",output_directory/"rotation_profiles.csv");
+        copy_if_present(input_directory/"rotation_spline_diagnostics.csv",output_directory/"rotation_spline_diagnostics.csv");
+        copy_if_present(input_directory/"gas_profiles.csv",output_directory/"gas_profiles.csv");
+        copy_if_present(input_directory/"gas_spline_diagnostics.csv",output_directory/"gas_spline_diagnostics.csv");
+        copy_if_present(input_directory/"sfr_spline_diagnostics.csv",output_directory/"sfr_spline_diagnostics.csv");
+        copy_if_present(input_directory/"sfr_crosscalibration.csv",output_directory/"sfr_crosscalibration.csv");
         copy_if_present(input_directory/"sparc_corrected.csv",output_directory/"sparc_corrected.csv");
         copy_if_present(input_directory/"leroy_profiles_used.csv",output_directory/"leroy_profiles_used.csv");
+        copy_if_present(input_directory/"bigiel_profiles_used.csv",output_directory/"bigiel_profiles_used.csv");
         std::cout << "Wrote model CSV output to " << output_directory << '\n';
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "galacticwind_model: " << error.what() << '\n';
+        std::cerr << "galactic-nuclear-fountain-model: " << error.what() << '\n';
         return 1;
     }
 }

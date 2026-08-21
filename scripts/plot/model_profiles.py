@@ -671,17 +671,16 @@ def plot_timescales(profiles, output_directory):
     )
 
 
-def plot_angular_momentum(profiles, rotations, output_directory):
-    flat_source = next(
+def plot_angular_momentum(profiles, rotations, summary, output_directory):
+    output_path = output_directory / "j.pdf"
+    profile_source = "SPARC_spline" if "SPARC_spline" in profiles else next(
         (rotation["source"] for rotation in rotations if rotation["kind"] == "flat"),
         None,
     )
-    output_path = output_directory / "j.pdf"
-    if flat_source is None:
-        output_path.unlink(missing_ok=True)
-        return
+    if profile_source is None:
+        raise ValueError("No SPARC spline or flat angular-momentum profile is available")
 
-    rows = profiles[flat_source]
+    rows = profiles[profile_source]
     figure, axis = plt.subplots()
     plotted_points = []
     nuclear_values = [
@@ -697,6 +696,17 @@ def plot_angular_momentum(profiles, rotations, output_directory):
     if not all(math.isclose(value, j_nuc, rel_tol=1.0e-9) for value in nuclear_values):
         raise ValueError("j_nuc is not constant across the angular-momentum profile")
 
+    mixing_mu_values = {
+        row["mu"]
+        for row in summary
+        if row["source"] == profile_source and math.isfinite(row["mu"])
+    }
+    if len(mixing_mu_values) != 1:
+        raise ValueError("Expected exactly one configured mu for the selected profile")
+    mixing_mu = next(iter(mixing_mu_values))
+    if math.isclose(mixing_mu, -1.0):
+        raise ValueError("Cannot compute j_land,CGM for mu = -1")
+
     quantities = (
         ("j_disk_kpc_kms", r"$j(R)/j_{\rm nuc}$", "tab:blue"),
         (
@@ -711,16 +721,29 @@ def plot_angular_momentum(profiles, rotations, output_directory):
         axis.plot(radius, values, color=color, linestyle="-", label=label)
         plotted_points.append((radius, values))
 
-    radius, values = finite_xy(rows, "R_kpc", "j_CGM_kpc_kms")
-    values = [value / j_nuc for value in values]
+    radius, cgm = finite_xy(rows, "R_kpc", "j_CGM_kpc_kms")
+    mixing = [
+        (j_nuc + mixing_mu * value) / ((1.0 + mixing_mu) * j_nuc)
+        for value in cgm
+    ]
     axis.plot(
         radius,
-        values,
+        mixing,
+        color="tab:green",
+        linestyle="--",
+        label=r"$j_{\rm land,CGM}(R)/j_{\rm nuc}$",
+    )
+    plotted_points.append((radius, mixing))
+
+    cgm = [value / j_nuc for value in cgm]
+    axis.plot(
+        radius,
+        cgm,
         color="tab:red",
         linestyle="-",
         label=r"$j_{\rm CGM}(R)/j_{\rm nuc}$",
     )
-    plotted_points.append((radius, values))
+    plotted_points.append((radius, cgm))
 
     finish_figure(
         figure,
@@ -790,7 +813,6 @@ def plot_metallicity(profiles, summary, output_directory):
         output_directory / "Z.pdf",
         r"$Z$",
         plotted_points,
-        legend=False,
     )
 
 
@@ -879,7 +901,7 @@ def render_model_run(model_output, output_directory, show_title=True):
         r"$\dot{M}_{\rm acc}\;[M_\odot\,\mathrm{yr}^{-1}]$",
     )
     plot_timescales(profiles, output_directory)
-    plot_angular_momentum(profiles, rotations, output_directory)
+    plot_angular_momentum(profiles, rotations, summary, output_directory)
     plot_metallicity(profiles, summary, output_directory)
     plot_mu(profiles, summary, output_directory)
 

@@ -1,4 +1,2 @@
 matplotlib
-pypdf
-reportlab
 smplotlib

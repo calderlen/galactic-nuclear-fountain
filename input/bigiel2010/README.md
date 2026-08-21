@@ -6,15 +6,9 @@ Star Formation in the Outer Disks of Nearby Galaxies* (AJ 140, 1194;
 doi:10.1088/0004-6256/140/5/1194; arXiv:1007.3498).
 
 The paper's electronic supplement provides pixel-distribution data, not the
-radial-profile table plotted in Figure 2. The values here are extracted from
-the vector EPS files in the original arXiv source using
-`scripts/data/extract_bigiel2010_figure2.py`. The original EPS files are not
-redistributed in this repository. To reproduce the table, unpack the arXiv
-source and run:
-
-```sh
-python3 scripts/data/extract_bigiel2010_figure2.py SOURCE_DIR input/bigiel2010/RadialProfiles.csv
-```
+radial-profile table plotted in Figure 2. The values here were extracted from
+the vector EPS files in the original arXiv source. The original EPS files and
+the one-time extraction utility are not distributed in this repository.
 
 The H I and FUV error bars are the plotted 1-sigma uncertainties in the mean
 within each annulus. `e_SigmaSFR_stat_Msun_yr_kpc2` is the plotted statistical

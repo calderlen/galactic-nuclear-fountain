@@ -1,0 +1,1 @@
+// kernel_runner.cpp would read potential parameters and weighted launch conditions, perform the integrations, and write orbits.csv, kernel.csv, and landing_sources.csv. None of those input/output paths is currently implemented in the repository.

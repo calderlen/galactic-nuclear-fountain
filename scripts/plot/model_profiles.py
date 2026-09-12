@@ -17,7 +17,6 @@ import smplotlib
 
 MODEL_FIGURE_SIZE = (3.5, 3.5)
 OBSERVATIONAL_SOURCE = "SPARC_spline"
-SURFACE_RATE_TO_MSUN_GYR_PC2 = 1.0e3
 
 
 smplotlib.set_style(
@@ -526,10 +525,8 @@ def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
             points = [
                 (
                     row["R_kpc"],
-                    row["Sigmadot_star_obs_Msun_yr_kpc2"]
-                    * SURFACE_RATE_TO_MSUN_GYR_PC2,
-                    row["e_Sigmadot_star_obs_Msun_yr_kpc2"]
-                    * SURFACE_RATE_TO_MSUN_GYR_PC2,
+                    row["Sigmadot_star_obs_Msun_yr_kpc2"],
+                    row["e_Sigmadot_star_obs_Msun_yr_kpc2"],
                 )
                 for row in sfr_diagnostics
                 if row["row_type"] == "measurement"
@@ -569,7 +566,6 @@ def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
     radius, star = finite_xy(
         first_rows, "R_kpc", "Sigmadot_star_Msun_yr_kpc2", positive=log_y
     )
-    star = [value * SURFACE_RATE_TO_MSUN_GYR_PC2 for value in star]
     axis.plot(
         radius,
         star,
@@ -584,9 +580,6 @@ def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
         radius, landing = finite_xy(
             rows, "R_kpc", "Sigmadot_land_Msun_yr_kpc2", positive=log_y
         )
-        landing = [
-            value * SURFACE_RATE_TO_MSUN_GYR_PC2 for value in landing
-        ]
         style = source_style(source, index, "color_dashed")
         style["color"] = "red"
         axis.plot(
@@ -602,7 +595,7 @@ def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
         figure,
         axis,
         output_directory / "surface_rates.pdf",
-        r"$\dot{\Sigma}\;[M_\odot\,\mathrm{Gyr}^{-1}\,\mathrm{pc}^{-2}]$",
+        r"$\dot{\Sigma}\;[M_\odot\,\mathrm{yr}^{-1}\,\mathrm{kpc}^{-2}]$",
         plotted_points,
         log_y=log_y,
     )

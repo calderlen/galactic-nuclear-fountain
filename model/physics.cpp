@@ -65,6 +65,14 @@ double mdot_land_mixing(double mdot_nucl, double mu){
     return mdot_nucl*(1.0+mu);
 }
 
+double mdot_nuc_burst(double t, double Mdot_0, double Mdot_b, double t_b, double sigma_b){
+    return Mdot_0 + Mdot_b*std::exp(-std::pow(t-t_b,2)/(2.0*sigma_b*sigma_b));
+}
+
+double mdot_launch(double mdot_nuc_burst, double eta){
+    return mdot_nuc_burst*eta;
+}
+
 // mass deposition rate per unit area of incident fountain gas
 double sigmadot_land(double R, double Mdot_land, double R_nucl, double R_out){
     return Mdot_land/(2.0*pi*R*R*std::log(R_out/R_nucl));
@@ -104,3 +112,4 @@ double metallicity_gradient(double Z, double sigma_g, double radial_velocity, do
 double z_land_required(double Z, double dZ_dR, double sigma_g, double v_R, double sigmadot_land, double sigmadot_star, double y){
     return Z+(sigma_g*v_R*dZ_dR-y*sigmadot_star)/sigmadot_land;
 }
+

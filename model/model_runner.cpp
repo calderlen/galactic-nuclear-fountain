@@ -4,12 +4,14 @@
 #include "csv.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -69,6 +71,8 @@ struct ProfileRow {
     double metallicity_derivative;
     double required_landing_metallicity;
     double mu_metallicity;
+    // Extra columns for evolving snapshots; legacy steady rows write NaN.
+    DoubleVec time_columns{};
 };
 
 struct ModelResult {
@@ -86,7 +90,7 @@ std::unordered_map<std::string,std::string> read_parameters(const std::filesyste
     const CsvTable table=read(path);
     std::unordered_map<std::string,std::string> parameters;
     for (const CsvRow& row: table.rows) {
-        parameters[value(row,"name")]=value(row,"value");
+        parameters[value(row, row.contains("name") ? "name" : "parameter")]=value(row,"value");
     }
     return parameters;
 }
@@ -280,11 +284,14 @@ void load_tabulated_gas_profiles(
 
 void write_profiles(const std::filesystem::path& path,const std::vector<ModelResult>& results){
     std::ofstream stream(path);
-    stream << "model,source,R_kpc,Sigma_g_Msun_kpc2,Sigmadot_star_Msun_yr_kpc2,Sigmadot_land_Msun_yr_kpc2,cumulative_landing_Msun_yr,v_R_kpc_yr,v_R_kms,F_R_Msun_yr,Mdot_acc_Msun_yr,t_inflow_Gyr,t_depletion_Gyr,v_c_kms,dv_c_dR_kms_kpc,j_disk_kpc_kms,j_CGM_kpc_kms,j_land_kpc_kms,delta_j_kpc_kms,j_land_over_j_disk,j_land_over_j_nucl,mu_j,Z,Z_eq,dZ_dR_per_kpc,Z_land_required,mu_Z\n";
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << "model,source,R_kpc,Sigma_g_Msun_kpc2,Sigmadot_star_Msun_yr_kpc2,Sigmadot_land_Msun_yr_kpc2,cumulative_landing_Msun_yr,v_R_kpc_yr,v_R_kms,F_R_Msun_yr,Mdot_acc_Msun_yr,t_inflow_Gyr,t_depletion_Gyr,v_c_kms,dv_c_dR_kms_kpc,j_disk_kpc_kms,j_CGM_kpc_kms,j_land_kpc_kms,delta_j_kpc_kms,j_land_over_j_disk,j_land_over_j_nucl,mu_j,Z,Z_eq,dZ_dR_per_kpc,Z_land_required,mu_Z,t_Myr,R_lo_kpc,R_hi_kpc,dSigma_g_dt_Msun_kpc2_Myr,dSigma_Z_dt_Msun_kpc2_Myr,dZ_dt_per_Myr,mass_flux_inner_Msun_yr,mass_flux_outer_Msun_yr,metal_flux_inner_Msun_yr,metal_flux_outer_Msun_yr,v_R_outer_kpc_yr,j_land_mixing_kpc_kms,Z_land_mixing,j_nucl_kpc_kms,R_j_kpc\n";
     stream << std::setprecision(17);
     for (const ModelResult& result: results) {
         for (const ProfileRow& row: result.profiles) {
-            stream << escape(row.model) << ',' << escape(row.source) << ',' << row.R << ',' << row.gas << ',' << row.star << ',' << row.landing << ',' << row.cumulative_landing << ',' << row.radial_velocity << ',' << row.radial_velocity_kms << ',' << row.radial_mass_flux << ',' << row.accretion << ',' << row.inflow_time << ',' << row.depletion_time << ',' << row.circular_velocity << ',' << row.circular_velocity_derivative << ',' << row.disk_angular_momentum << ',' << row.cgm_angular_momentum << ',' << row.landing_angular_momentum << ',' << row.angular_momentum_difference << ',' << row.landing_to_disk << ',' << row.landing_to_nuclear << ',' << row.mu_angular_momentum << ',' << row.metallicity << ',' << row.equilibrium_metallicity << ',' << row.metallicity_derivative << ',' << row.required_landing_metallicity << ',' << row.mu_metallicity << '\n';
+            stream << escape(row.model) << ',' << escape(row.source) << ',' << row.R << ',' << row.gas << ',' << row.star << ',' << row.landing << ',' << row.cumulative_landing << ',' << row.radial_velocity << ',' << row.radial_velocity_kms << ',' << row.radial_mass_flux << ',' << row.accretion << ',' << row.inflow_time << ',' << row.depletion_time << ',' << row.circular_velocity << ',' << row.circular_velocity_derivative << ',' << row.disk_angular_momentum << ',' << row.cgm_angular_momentum << ',' << row.landing_angular_momentum << ',' << row.angular_momentum_difference << ',' << row.landing_to_disk << ',' << row.landing_to_nuclear << ',' << row.mu_angular_momentum << ',' << row.metallicity << ',' << row.equilibrium_metallicity << ',' << row.metallicity_derivative << ',' << row.required_landing_metallicity << ',' << row.mu_metallicity;
+            for (std::size_t i=0; i<15; ++i) stream << ',' << (row.time_columns.empty() ? std::numeric_limits<double>::quiet_NaN() : row.time_columns.at(i));
+            stream << '\n';
         }
     }
 }
@@ -300,12 +307,13 @@ bool landing_nonnegative(const ModelResult& result){
     return minimum_landing>=-tolerance;
 }
 
-void write_summary(const std::filesystem::path& path,const std::string& model,const std::string& profile_type,const std::string& galaxy,const std::vector<ModelResult>& results,double R_nucl,double R_out,double Mdot_land,double Mdot_out,double mu,double beta,double Z_nucl,double Z_CGM,double yield,double Z_boundary,double R_Z_boundary,bool metallicity_solved){
+void write_summary(const std::filesystem::path& path,const std::string& model,const std::string& profile_type,const std::string& galaxy,const std::vector<ModelResult>& results,double R_nucl,double R_out,double Mdot_land,double Mdot_out,double mu,double beta,double Z_nucl,double Z_CGM,double yield,double Z_boundary,double R_Z_boundary,bool metallicity_solved,double t_Myr=std::numeric_limits<double>::quiet_NaN(),double R_min=std::numeric_limits<double>::quiet_NaN()){
     std::ofstream stream(path);
-    stream << "model,profile_type,galaxy,source,R_nucl_kpc,R_out_kpc,Mdot_land_Msun_yr,Mdot_out_Msun_yr,mu,beta,Z_nucl,Z_CGM,yield_y,Z_outer_boundary,R_Z_boundary_kpc,metallicity_solved,total_landing_Msun_yr,initial_radial_velocity_kpc_yr,initial_landing_rate_Msun_yr_kpc2,chi2,dof,reduced_chi2,landing_nonnegative\n";
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << "model,profile_type,galaxy,source,R_nucl_kpc,R_out_kpc,Mdot_land_Msun_yr,Mdot_out_Msun_yr,mu,beta,Z_nucl,Z_CGM,yield_y,Z_outer_boundary,R_Z_boundary_kpc,metallicity_solved,total_landing_Msun_yr,initial_radial_velocity_kpc_yr,initial_landing_rate_Msun_yr_kpc2,chi2,dof,reduced_chi2,landing_nonnegative,t_Myr,R_min_kpc\n";
     stream << std::setprecision(17);
     for (const ModelResult& result: results) {
-        stream << escape(model) << ',' << escape(profile_type) << ',' << escape(galaxy) << ',' << escape(result.source) << ',' << R_nucl << ',' << R_out << ',' << Mdot_land << ',' << Mdot_out << ',' << mu << ',' << beta << ',' << Z_nucl << ',' << Z_CGM << ',' << yield << ',' << Z_boundary << ',' << R_Z_boundary << ',' << (metallicity_solved ? 1 : 0) << ',' << result.total_landing << ',' << result.initial_radial_velocity << ',' << result.initial_landing_rate << ',' << result.rotation_chi2 << ',' << result.rotation_dof << ',' << result.rotation_reduced_chi2 << ',' << (landing_nonnegative(result) ? "true" : "false") << '\n';
+        stream << escape(model) << ',' << escape(profile_type) << ',' << escape(galaxy) << ',' << escape(result.source) << ',' << R_nucl << ',' << R_out << ',' << Mdot_land << ',' << Mdot_out << ',' << mu << ',' << beta << ',' << Z_nucl << ',' << Z_CGM << ',' << yield << ',' << Z_boundary << ',' << R_Z_boundary << ',' << (metallicity_solved ? 1 : 0) << ',' << result.total_landing << ',' << result.initial_radial_velocity << ',' << result.initial_landing_rate << ',' << result.rotation_chi2 << ',' << result.rotation_dof << ',' << result.rotation_reduced_chi2 << ',' << (landing_nonnegative(result) ? "true" : "false") << ',' << t_Myr << ',' << R_min << '\n';
     }
 }
 
@@ -315,12 +323,189 @@ void copy_if_present(const std::filesystem::path& source,const std::filesystem::
     }
 }
 
+// Reuse the usual profile writer for snapshots, retaining the finite-volume
+// time derivatives and face transport instead of invoking the steady solver.
+void write_evolving_snapshots(const std::string& model,const std::filesystem::path& input,
+                             const std::filesystem::path& output,DoubleVec times){
+    const double nan=std::numeric_limits<double>::quiet_NaN();
+    const auto parameters=read_parameters(input/"parameters.csv");
+    if (parameter_string(parameters,"landing_mass_origin","")!="nuclear_plus_cgm") {
+        throw std::runtime_error("Time snapshots require a kernel --evolve run with nuclear+CGM landing rates");
+    }
+    const auto finite=[](const CsvRow& row,const char* key){
+        const double result=number(row,key);
+        if (!std::isfinite(result)) throw std::runtime_error(std::string("Snapshot needs finite ")+key+"; regenerate older kernel outputs with --evolve");
+        return result;
+    };
+    const CsvTable gas_table=read(input/"gas_evolution.csv");
+    const CsvTable landing_table=read(input/"landing_sources.csv");
+    std::map<double,std::vector<const CsvRow*>> gas_times,landing_times;
+    for (const auto& row: gas_table.rows) gas_times[finite(row,"t_Myr")].push_back(&row);
+    for (const auto& row: landing_table.rows) landing_times[finite(row,"t_Myr")].push_back(&row);
+    if (gas_times.empty()) throw std::runtime_error("No evolving disk snapshots found");
+    if (times.empty()) times.push_back(gas_times.rbegin()->first);
+    // Resolve only saved times; never silently treat an interpolated state as a saved snapshot.
+    for (double& t: times) {
+        const auto match=std::find_if(gas_times.begin(),gas_times.end(),[&](const auto& entry){
+            return std::abs(entry.first-t)<=1e-10*std::max(1.0,std::abs(t));
+        });
+        if (match==gas_times.end()) throw std::runtime_error("Requested time is not saved: "+std::to_string(t)+" Myr");
+        t=match->first;
+    }
+    std::sort(times.begin(),times.end());
+    times.erase(std::unique(times.begin(),times.end()),times.end());
+    std::vector<std::string> directories;
+    for (const double t: times) {
+        auto rows=gas_times.at(t);
+        auto landing_rows=landing_times.at(t);
+        const auto by_radius=[&](const CsvRow* a,const CsvRow* b){return finite(*a,"R_lo_kpc")<finite(*b,"R_lo_kpc");};
+        std::sort(rows.begin(),rows.end(),by_radius);
+        std::sort(landing_rows.begin(),landing_rows.end(),by_radius);
+        const std::size_t n=rows.size();
+        if (n!=landing_rows.size()) throw std::runtime_error("Gas and landing snapshots have different annuli");
+        MassContinuityParameters p;
+        p.R_nucl=parameter_double(parameters,"mixing_R_nucl_kpc");
+        p.mu=parameter_double(parameters,"mu");
+        p.beta=parameter_double(parameters,"beta");
+        p.Z_nucl=parameter_double(parameters,"Z_nucl");
+        p.Z_CGM=parameter_double(parameters,"Z_CGM");
+        p.yield=parameter_double(parameters,"yield_y");
+        p.inner_mass_flux=parameter_double(parameters,"inner_mass_flux_Msun_yr");
+        p.outer_mass_flux=parameter_double(parameters,"outer_mass_flux_Msun_yr");
+        p.Z_inner_inflow=parameter_double(parameters,"Z_inner_inflow");
+        p.Z_outer_inflow=parameter_double(parameters,"Z_outer_inflow");
+        const double j_nucl=parameter_double(parameters,"j_nucl_kpc_kms");
+        const double Z_land=z_land_mixing(p.Z_nucl,p.Z_CGM,p.mu);
+        DoubleVec state(2*n),derivative(2*n),landing(n),radius(n),area(n),Z(n),vc(n),dvc(n),edge_velocity(n),edge_vc(n),edge_dvc(n);
+        for (std::size_t i=0; i<n; ++i) {
+            const auto& row=*rows[i];
+            const double lo=finite(row,"R_lo_kpc"),hi=finite(row,"R_hi_kpc");
+            if (lo<0.0 || hi<=lo || (i>0 && lo!=p.R_bins.back()) ||
+                lo!=finite(*landing_rows[i],"R_lo_kpc") || hi!=finite(*landing_rows[i],"R_hi_kpc")) {
+                throw std::runtime_error("Snapshot annuli must be contiguous and match the landing grid");
+            }
+            if (i==0) p.R_bins.push_back(lo);
+            p.R_bins.push_back(hi);
+            radius[i]=0.5*(lo+hi);
+            area[i]=pi*(hi-lo)*(hi+lo);
+            state[i]=finite(row,"Sigma_g_Msun_kpc2");
+            state[n+i]=finite(row,"Sigma_Z_Msun_kpc2");
+            derivative[i]=finite(row,"dSigma_g_dt_Msun_kpc2_Myr");
+            derivative[n+i]=finite(row,"dSigma_Z_dt_Msun_kpc2_Myr");
+            p.sigmadot_star.push_back(finite(row,"Sigmadot_star_Msun_yr_kpc2"));
+            landing[i]=finite(*landing_rows[i],"Sigmadot_land_Msun_yr_kpc2");
+            vc[i]=finite(row,"v_c_kms");
+            dvc[i]=finite(row,"dv_c_dR_kms_kpc");
+            edge_velocity[i]=model=="disk-evolution" ? finite(row,"v_R_outer_kpc_yr") : 0.0;
+            edge_vc[i]=finite(row,"v_c_outer_kms");
+            edge_dvc[i]=finite(row,"dv_c_dR_outer_kms_kpc");
+            if (landing[i]<0.0 || p.sigmadot_star[i]<0.0 || vc[i]<=0.0 || vc[i]+radius[i]*dvc[i]<=0.0) {
+                throw std::runtime_error("Snapshot needs nonnegative sources and a positive circular speed and dj_disk/dR");
+            }
+            Z[i]=state[i]>0.0 ? state[n+i]/state[i] : nan;
+        }
+        DoubleVec flux(n+1);
+        if (model=="reconstruction") {
+            flux=reconstruct_mass_flux(derivative,landing,p);
+        } else {
+            flux.front()=p.inner_mass_flux;
+            flux.back()=p.outer_mass_flux;
+            for (std::size_t edge=1; edge<n; ++edge) {
+                const double velocity=edge_velocity[edge-1];
+                flux[edge]=2.0*pi*p.R_bins[edge]*velocity*state[velocity>=0.0 ? edge-1 : edge];
+            }
+        }
+        const DoubleVec metal_flux=disk_metal_flux(state,flux,p);
+        const DoubleVec required_Z=reconstruct_landing_metallicity(state,derivative,landing,metal_flux,p);
+        const auto divide=[&](double a,double b){return std::isfinite(a) && std::isfinite(b) && b!=0.0 ? a/b : nan;};
+        ModelResult result{"orbit_potential",{},0.0,nan,landing.front(),nan,nan,nan};
+        double cumulative=0.0;
+        for (std::size_t i=0; i<n; ++i) {
+            const double R=radius[i],lo=p.R_bins[i],hi=p.R_bins[i+1];
+            // Constant annular source/divergence: integrate by area to the midpoint.
+            const double inner_area=pi*(R-lo)*(R+lo),fraction=inner_area/area[i];
+            const double F=flux[i]+fraction*(flux[i+1]-flux[i]);
+            const double velocity=divide(F,2.0*pi*R*state[i]);
+            // Angular-momentum closure lives on internal faces, like the solver's
+            // transport. R_j_kpc records this staggered sampling explicitly.
+            const double disk=j_disk(hi,edge_vc[i]),cgm=j_cgm(hi,p.beta,edge_vc[i]);
+            const double mixed_j=(j_nucl+p.mu*cgm)/(1.0+p.mu);
+            const double weight=i+1<n ? (hi-lo)/(p.R_bins[i+2]-lo) : 0.0;
+            const double face_landing=i+1<n ? (1.0-weight)*landing[i]+weight*landing[i+1] : 0.0;
+            const double required_j=face_landing>0.0 ? disk+flux[i+1]/(2.0*pi*hi*face_landing)*dj_disk_dR(hi,edge_vc[i],edge_dvc[i]) : nan;
+            const double incident_j=face_landing>0.0 ? (model=="reconstruction" ? required_j : mixed_j) : nan;
+            const std::size_t left=i==0 ? 0 : i-1,right=i+1<n ? i+1 : i;
+            const double dZ_dR=divide(Z[right]-Z[left],radius[right]-radius[left]);
+            const double dZ_dt=divide(derivative[n+i]-Z[i]*derivative[i],state[i]);
+            double outer_velocity=nan;
+            if (i+1<n) outer_velocity=divide(flux[i+1],2.0*pi*hi*state[flux[i+1]>=0.0 ? i : i+1]);
+            else if (flux.back()==0.0) outer_velocity=0.0;
+            const double cumulative_at_R=cumulative+inner_area*landing[i];
+            cumulative+=area[i]*landing[i];
+            result.profiles.push_back({model,result.source,R,state[i],p.sigmadot_star[i],landing[i],cumulative_at_R,
+                velocity,velocity*kpc_per_year_to_km_per_second,F/(2.0*pi),-F,
+                divide(R,std::abs(velocity))/1e9,divide(state[i],p.sigmadot_star[i])/1e9,vc[i],dvc[i],disk,cgm,
+                incident_j,incident_j-disk,divide(incident_j,disk),divide(incident_j,j_nucl),
+                divide(incident_j-j_nucl,cgm-incident_j),Z[i],landing[i]>0.0 ? Z_land+p.yield*p.sigmadot_star[i]/landing[i] : nan,
+                dZ_dR,required_Z[i],divide(required_Z[i]-p.Z_nucl,p.Z_CGM-required_Z[i]),
+                {t,lo,hi,derivative[i],derivative[n+i],dZ_dt,flux[i],flux[i+1],metal_flux[i],metal_flux[i+1],outer_velocity,mixed_j,Z_land,j_nucl,hi}});
+        }
+        result.total_landing=cumulative;
+        result.initial_radial_velocity=result.profiles.front().radial_velocity;
+        char buffer[64];
+        const auto converted=std::to_chars(buffer,buffer+sizeof(buffer),t);
+        if (converted.ec!=std::errc{}) throw std::runtime_error("Cannot format snapshot time");
+        const std::string directory="t_"+std::string(buffer,converted.ptr)+"_Myr";
+        const auto destination=output/directory;
+        std::filesystem::create_directories(destination);
+        const std::vector<ModelResult> results{std::move(result)};
+        write_profiles(destination/"profiles.csv",results);
+        write_summary(destination/"summary.csv",model,"evolving","illustrative",results,p.R_nucl,p.R_bins.back(),
+            cumulative,-p.outer_mass_flux,p.mu,p.beta,p.Z_nucl,p.Z_CGM,p.yield,nan,nan,true,t,p.R_bins.front());
+        std::ofstream rotations(destination/"rotation_curves.csv");
+        rotations.exceptions(std::ios::failbit | std::ios::badbit);
+        rotations << "source,kind,Vflat_kms,lflat_kpc,chi2,dof,reduced_chi2\norbit_potential,tabulated,nan,nan,nan,nan,nan\n";
+        copy_if_present(input/"parameters.csv",destination/"parameters.csv");
+        std::ofstream provenance(destination/"snapshot.csv");
+        provenance.exceptions(std::ios::failbit | std::ios::badbit);
+        provenance << std::setprecision(17) << "parameter,value\ninput_directory," << escape(std::filesystem::absolute(input).string())
+            << "\nt_Myr," << t << "\nmodel," << model
+            << "\ntime_derivatives,instantaneous_saved_rhs\nlanding_mass_origin,nuclear_plus_cgm\ncumulative_from_R_kpc," << p.R_bins.front()
+            << "\nradial_sampling,annulus_midpoints_with_area_integrated_flux\nangular_sampling,R_j_kpc_internal_faces\nmetal_transport,shared_upwind_faces\n"
+            << "inner_mass_flux_inferred_Msun_yr," << flux.front() << '\n';
+        directories.push_back(directory);
+    }
+    std::ofstream manifest(output/"snapshots.csv");
+    manifest.exceptions(std::ios::failbit | std::ios::badbit);
+    manifest << std::setprecision(17) << "t_Myr,directory\n";
+    for (std::size_t i=0; i<times.size(); ++i) manifest << times[i] << ',' << directories[i] << '\n';
+    std::cout << "Wrote " << times.size() << " " << model << " snapshots to " << output << '\n';
+}
+
 }
 
 int main(int argc,char** argv){
     try {
+        std::string snapshot_mode=argc>1 ? argv[1] : "";
+        // Accept earlier commands, but write only the current names to outputs.
+        if (snapshot_mode=="forward-time") snapshot_mode="disk-evolution";
+        if (snapshot_mode=="inverse-time") snapshot_mode="reconstruction";
+        if (argc>=4 && (snapshot_mode=="disk-evolution" || snapshot_mode=="reconstruction")) {
+            DoubleVec times;
+            for (int i=4; i<argc; ++i) {
+                std::size_t used=0;
+                const double t=std::stod(argv[i],&used);
+                if (!std::isfinite(t) || used!=std::string(argv[i]).size()) throw std::runtime_error("Snapshot times must be finite Myr values");
+                times.push_back(t);
+            }
+            write_evolving_snapshots(snapshot_mode,argv[2],argv[3],times);
+            return 0;
+        }
         if (argc!=4) {
-            std::cerr << "Usage: galactic-nuclear-fountain-model <forward|inverse> <input-directory> <output-directory>\n";
+            std::cerr << "Usage: galactic-nuclear-fountain-model <forward|inverse> <input-directory> <output-directory>\n"
+                      << "   or: galactic-nuclear-fountain-model <disk-evolution|reconstruction> <kernel-run-directory> <output-directory> [t_Myr ...]\n"
+                      << "disk-evolution exports the saved disk evolution; reconstruction recovers the required flow and mixture from it.\n"
+                      << "Both use t_<time>_Myr output directories; the latest saved time is the default.\n";
             return 2;
         }
 

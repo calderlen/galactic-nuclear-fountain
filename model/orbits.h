@@ -1,6 +1,7 @@
 # pragma once
 
 # include "rk4.h"
+# include <limits>
 
 struct OrbitParameters {
     double M_d; // disk mass [M_sun]
@@ -18,6 +19,16 @@ struct OrbitParameters {
 
 DoubleVec orbit(double t, const DoubleVec& state, const void* params);
 
-DoubleVec integrate_orbit(const DoubleVec& launch_conditions,
-                         const OrbitParameters& potential_params,
-                         double h_0, double atol, double rtol, double t_stop);
+enum class OrbitStatus { Returned, TimedOut, IntegrationFailed };
+
+struct OrbitResult {
+    OrbitStatus status;
+    double R_land = std::numeric_limits<double>::quiet_NaN(); // [kpc], returns only
+    double flight_time = std::numeric_limits<double>::quiet_NaN(); // [Myr], returns only
+};
+
+// Upward launches only: R > 0, z >= 0, vz > 0. A timeout is not an escape.
+OrbitResult integrate_orbit(const DoubleVec& launch_conditions,
+                            const OrbitParameters& potential_params,
+                            double h_0, double atol, double rtol, double t_stop,
+                            double h_max = 1.0);

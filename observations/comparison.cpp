@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
-#include <stdexcept>
 #include <tuple>
 
 namespace galactic_nuclear_fountain {

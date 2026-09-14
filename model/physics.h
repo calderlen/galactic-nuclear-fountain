@@ -15,6 +15,10 @@ double j_land_required(double R, double sigma_g, double v_R, double sigmadot_lan
 double mu_from_mixing(double required,double nuclear,double cgm);
 
 double mdot_land_mixing(double mdot_nucl, double mu);
+// Baseline plus Gaussian nuclear burst; use Myr for t, t_b and sigma_b when
+// coupling to the landing kernel. Rates are Msun/yr; eta is dimensionless.
+double mdot_nuc_burst(double t, double Mdot_0, double Mdot_b, double t_b, double sigma_b);
+double mdot_launch(double mdot_nuc_burst, double eta);
 double sigmadot_land(double R, double Mdot_land, double R_nucl, double R_out);
 double radial_velocity_gradient(double radial_velocity,double R,double sigma_g,double dsigma_g_dR,double sigmadot_star,double j_disk,double j_land,double dj_disk_dR);
 double sigmadot_land_from_velocity(double sigma_g,double radial_velocity,double j_disk,double j_land,double dj_disk_dR);

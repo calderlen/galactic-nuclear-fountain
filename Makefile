@@ -15,15 +15,18 @@ LIBRARY := $(BUILD_DIR)/libgalactic-nuclear-fountain.a
 RUNNER := $(BUILD_DIR)/galactic-nuclear-fountain-model
 COMPARISON := $(BUILD_DIR)/galactic-nuclear-fountain-compare
 KERNEL := $(BUILD_DIR)/galactic-nuclear-fountain-kernel
+TRAJECTORIES := $(BUILD_DIR)/galactic-nuclear-fountain-trajectories
 RUNNER_OBJECTS := $(BUILD_DIR)/model/model_runner.o $(BUILD_DIR)/io/csv.o
 COMPARISON_OBJECTS := $(BUILD_DIR)/observations/comparison_runner.o \
 	$(BUILD_DIR)/observations/comparison.o $(BUILD_DIR)/io/csv.o
 
-.PHONY: all kernel
+.PHONY: all kernel trajectories
 
-all: $(RUNNER) $(COMPARISON) $(KERNEL)
+all: $(RUNNER) $(COMPARISON) $(KERNEL) $(TRAJECTORIES)
 
 kernel: $(KERNEL)
+
+trajectories: $(TRAJECTORIES)
 
 $(LIBRARY): $(MODEL_OBJECTS)
 	$(AR) $(ARFLAGS) $@ $^
@@ -35,7 +38,10 @@ $(COMPARISON): $(COMPARISON_OBJECTS)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 $(KERNEL): $(BUILD_DIR)/model/kernel_runner.o $(BUILD_DIR)/io/csv.o $(LIBRARY)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@ -lz
+
+$(TRAJECTORIES): $(BUILD_DIR)/model/trajectory_runner.o $(BUILD_DIR)/io/csv.o $(LIBRARY)
+	$(CXX) $(CXXFLAGS) $^ -o $@ -lz
 
 $(BUILD_DIR)/%.o: %.cpp $(HEADERS)
 	mkdir -p $(@D)

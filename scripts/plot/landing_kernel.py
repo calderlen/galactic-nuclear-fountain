@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import gzip
 import math
 from pathlib import Path
 
@@ -11,7 +12,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, SymLogNorm
 from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle
 import numpy as np
 
 from hershey_fonts import register_hershey_weight_aliases
@@ -21,6 +21,11 @@ import smplotlib
 
 
 SINGLE_COLUMN_FIGURE_SIZE = (3.5, 3.5)
+ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC = 0.05
+ANGULAR_MOMENTUM_RATIO_BIN_WIDTH = 0.025
+ANGULAR_MOMENTUM_RATIO_LIMIT = 2.0
+MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS = 10.0
+MEDIAN_DISPLACEMENT_THETA_BIN_WIDTH_DEG = 1.0
 
 
 def diagnostic_page(nrows, ncols):
@@ -32,11 +37,27 @@ def diagnostic_page(nrows, ncols):
     return figure, axes
 
 
-def square_colorbar(mesh, ax, label):
+def square_colorbar(mesh, ax, label, **kwargs):
     """Keep the data axes square and the colorbar aligned to their height."""
     ax.set_box_aspect(1)
     colorbar_ax = ax.inset_axes([1.05, 0, 0.05, 1])
-    ax.figure.colorbar(mesh, cax=colorbar_ax, label=label)
+    return ax.figure.colorbar(mesh, cax=colorbar_ax, label=label, **kwargs)
+
+
+def add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, norm):
+    """Show the low-radius, short-delay peak over sparse main-panel data."""
+    zoom_ax = ax.inset_axes([0.62, 0.35, 0.30, 0.30], zorder=6)
+    zoom_ax.set_facecolor("white")
+    zoom_ax.pcolormesh(
+        radius_edges, delay_edges, np.ma.masked_equal(density.T, 0.0),
+        cmap=color_map, norm=norm, shading="flat", rasterized=True,
+    )
+    zoom_ax.set(
+        xlim=(0, 5), ylim=(0, 100), box_aspect=1,
+        xticks=(0, 2.5, 5), yticks=(0, 50, 100),
+    )
+    zoom_ax.tick_params(which="major", labelsize=6, length=2, pad=2)
+    zoom_ax.tick_params(which="minor", length=1)
 
 
 def save_diagnostics(figure, output_directory, stem, panel_names):
@@ -54,8 +75,19 @@ def save_diagnostics(figure, output_directory, stem, panel_names):
             other.set_visible(other is panel)
         bounds = panel.bbox.transformed(figure.dpi_scale_trans.inverted()).frozen()
         ax = panel.axes[0]
+        content = ax.get_tightbbox(renderer).transformed(figure.dpi_scale_trans.inverted())
+        # Some interior subfigures place left tick labels just outside their
+        # nominal panel box. Shift the fixed-width export window to retain all
+        # horizontal decorations without exceeding the 3.5-inch column width.
+        width = bounds.width
+        x0 = bounds.x0
+        if content.x0 - 0.04 < x0:
+            x0 = content.x0 - 0.04
+        if content.x1 + 0.04 > x0 + width:
+            x0 = content.x1 + 0.04 - width
+        bounds.x0 = x0
+        bounds.x1 = x0 + width
         if ax.get_box_aspect() == 1:
-            content = ax.get_tightbbox(renderer).transformed(figure.dpi_scale_trans.inverted())
             bounds.y0 = max(bounds.y0, content.y0 - 0.04)
             bounds.y1 = min(bounds.y1, content.y1 + 0.04)
         destination = output_directory / f"{stem}_{name}.pdf"
@@ -126,7 +158,7 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
     """Derive four physical panels from saved launches and first returns."""
     angular_ax, median_ax, energy_ax, area_ax = axes
     fields = ("R0_kpc", "z0_kpc", "vR0_kms", "vz0_kms", "vphi0_kms",
-              "j_z_kpc2_per_Myr", "v_k_kms", "theta_rad", "weight")
+              "j_z0_kpc2_per_Myr", "v_k_kms", "theta_rad", "weight")
     values = {key: np.array([float(row[key]) for row in parcels]) for key in fields}
     if any(not np.all(np.isfinite(array)) for array in values.values()):
         raise ValueError("Physical diagnostics require finite launch properties")
@@ -138,22 +170,46 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
     R = np.array([float(row["R_land_kpc"]) for row in parcels if row["status"] == "returned"])
     conversion = float(parameters["kms_to_kpc_per_Myr"])
 
-    # Extend the radial display bins to include returns outside the kernel grid.
-    width = radius_edges[-1] - radius_edges[-2]
-    extra = max(0, math.ceil((float(R.max()) - radius_edges[-1]) / width)) if R.size else 0
-    radial_edges = np.r_[radius_edges, radius_edges[-1] + width * np.arange(1, extra + 1)]
+    # Rebin the saved returns more finely than the kernel grid for this display.
+    # Keep the full saved radial range so the mass-conservation check includes
+    # parcels outside the visible panel.
+    radial_lo = ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC * math.floor(
+        float(radius_edges[0]) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
+    )
+    radial_hi = ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC * math.ceil(
+        max(float(radius_edges[-1]), float(R.max()) if R.size else float(radius_edges[-1]))
+        / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
+    )
+    radial_bin_count = round(
+        (radial_hi - radial_lo) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
+    )
+    radial_edges = np.linspace(radial_lo, radial_hi, radial_bin_count + 1)
     if R.size:
         _, gradient = potential_and_radial_gradient(R, 0.0, parameters)
         if np.any(R <= 0) or np.any(gradient <= 0) or not np.all(np.isfinite(gradient)):
             raise ValueError("Landing radii must have finite, positive circular speeds")
-        eta = values["j_z_kpc2_per_Myr"][returned] / (R * np.sqrt(R * gradient))
+        j_land = np.array([float(row["j_land_kpc2_per_Myr"]) for row in parcels if row["status"] == "returned"])
+        eta = j_land / (R * np.sqrt(R * gradient))
         if not np.all(np.isfinite(eta)):
             raise ValueError("Nonfinite angular-momentum ratios")
-        eta_edges = np.linspace(min(0.0, float(eta.min())), max(1.1, float(eta.max())), 101)
+        visible_eta_edges = np.linspace(
+            -ANGULAR_MOMENTUM_RATIO_LIMIT,
+            ANGULAR_MOMENTUM_RATIO_LIMIT,
+            round(2 * ANGULAR_MOMENTUM_RATIO_LIMIT / ANGULAR_MOMENTUM_RATIO_BIN_WIDTH) + 1,
+        )
+        # The first and last cells collect any values outside the displayed
+        # ratio range, retaining every returned parcel in the mass accounting.
+        eta_edges = np.unique(np.r_[
+            min(float(eta.min()), -ANGULAR_MOMENTUM_RATIO_LIMIT),
+            visible_eta_edges,
+            max(float(eta.max()), ANGULAR_MOMENTUM_RATIO_LIMIT),
+        ])
         mass, _, _ = np.histogram2d(R, eta, bins=(radial_edges, eta_edges), weights=returned_weights)
         if not np.isclose(mass.sum(), returned_fraction, rtol=1e-10, atol=1e-12):
             raise ValueError("Angular-momentum heatmap lost returned mass")
-        positive = mass[mass > 0]
+        eta_centers = 0.5 * (eta_edges[1:] + eta_edges[:-1])
+        visible = np.abs(eta_centers) <= ANGULAR_MOMENTUM_RATIO_LIMIT
+        positive = mass[:, visible][mass[:, visible] > 0]
         color_map = plt.get_cmap("magma").copy()
         color_map.set_bad("white")
         lo, hi = (float(positive.min()), float(positive.max())) if positive.size else (1e-6, 1.0)
@@ -164,29 +220,45 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
         square_colorbar(mesh, angular_ax, label=r"$\Delta f_{\rm ret}$")
         if returned_fraction > 0:
             print(f"Returned mass with eta_j < 1: {returned_weights[eta < 1].sum() / returned_fraction:.6f}")
+            overflow = returned_weights[np.abs(eta) > ANGULAR_MOMENTUM_RATIO_LIMIT].sum()
+            print(f"Returned mass outside displayed eta_j range: {overflow / returned_fraction:.6f}")
 
-        speed_edges = np.arange(0, max(25.0, np.ceil(values["v_k_kms"].max() / 25) * 25) + 25, 25)
-        theta_edges = np.linspace(0, np.pi / 2, 31)
+        speed_limit = max(
+            MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS,
+            np.ceil(values["v_k_kms"].max() / MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS)
+            * MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS,
+        )
+        speed_edges = np.arange(
+            0,
+            speed_limit + MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS,
+            MEDIAN_DISPLACEMENT_SPEED_BIN_WIDTH_KMS,
+        )
+        theta_edges = np.deg2rad(np.arange(
+            0,
+            90 + MEDIAN_DISPLACEMENT_THETA_BIN_WIDTH_DEG,
+            MEDIAN_DISPLACEMENT_THETA_BIN_WIDTH_DEG,
+        ))
         median = binned_weighted_median(
             values["v_k_kms"][returned], values["theta_rad"][returned],
             R - values["R0_kpc"][returned], returned_weights, speed_edges, theta_edges,
         )
         finite = median[np.isfinite(median)]
-        limit = max(0.1, float(np.abs(finite).max())) if finite.size else 1.0
+        limit = max(0.1, float(np.percentile(np.abs(finite), 99))) if finite.size else 1.0
         color_map = plt.get_cmap("RdBu_r").copy()
         color_map.set_bad("white")
         mesh = median_ax.pcolormesh(
             speed_edges, np.rad2deg(theta_edges), np.ma.masked_invalid(median.T), cmap=color_map,
-            norm=SymLogNorm(linthresh=0.1, vmin=-limit, vmax=limit, base=10), shading="flat", rasterized=True,
+            norm=SymLogNorm(linthresh=0.1, vmin=-limit, vmax=limit, base=10, clip=True),
+            shading="flat", rasterized=True,
         )
-        square_colorbar(mesh, median_ax, label=r"Median $\Delta R$ [kpc]")
+        square_colorbar(mesh, median_ax, label=r"Median $\Delta R$ [kpc]", extend="both")
     else:
         for ax in (angular_ax, median_ax):
             ax.text(0.5, 0.5, "No returning parcels", ha="center", transform=ax.transAxes)
-    angular_ax.axhline(1, color="black", linestyle="--", linewidth=1.2)
     angular_ax.set(xlabel=r"$R_{\rm land}$ [kpc]",
-                   ylabel=r"$j_z/R_{\rm land}v_c(R_{\rm land})$",
-                   xlim=(0, 25), ylim=(-3, 3))
+                   ylabel=r"$j_{z,\rm land}/[R_{\rm land}v_c(R_{\rm land})]$",
+                   xlim=(0, 20),
+                   ylim=(-ANGULAR_MOMENTUM_RATIO_LIMIT, ANGULAR_MOMENTUM_RATIO_LIMIT))
     median_ax.set_xlabel(r"$v_k$ [km s$^{-1}$]")
     median_ax.set_ylabel(r"$\theta$ [${}^{\circ}$]", math_fontfamily="cm")
     median_ax.set(ylim=(0, 90), yticks=np.arange(0, 91, 15))
@@ -334,10 +406,10 @@ def plot_launches(parcels, run_directory, output_directory):
 
 
 def plot_kernel(run_directory, output_directory, full_grid=False):
-    with (run_directory / "orbits.csv").open(newline="") as stream:
+    with gzip.open(run_directory / "orbits.csv.gz", mode="rt", newline="") as stream:
         parcels = list(csv.DictReader(stream))
     if not parcels:
-        raise ValueError("No launch records in orbits.csv")
+        raise ValueError("No launch records in orbits.csv.gz")
     returned = [row for row in parcels if row["status"] == "returned"]
     weights = np.array([float(row["weight"]) for row in parcels])
     total_weight = float(weights.sum())
@@ -352,13 +424,13 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
     radius_indices = np.searchsorted(radius_edges, cells["R_lo_kpc"])
     delay_indices = np.searchsorted(delay_edges, cells["tau_lo_Myr"])
     density = np.full((len(radius_edges) - 1, len(delay_edges) - 1), np.nan)
-    density[radius_indices, delay_indices] = cells["K_per_kpc_per_Myr"]
+    density[radius_indices, delay_indices] = cells["K_per_kpc2_per_Myr"]
     if not np.all(np.isfinite(density)) or np.any(density < 0) or total_weight <= 0:
         raise ValueError("Expected a complete nonnegative kernel grid and positive launched weight")
 
     # Check both the density convention and the actual parcel-to-cell accounting.
-    cell_fractions = cells["K_per_kpc_per_Myr"] * (
-        cells["R_hi_kpc"] - cells["R_lo_kpc"]) * (
+    cell_fractions = cells["K_per_kpc2_per_Myr"] * np.pi * (
+        cells["R_hi_kpc"]**2 - cells["R_lo_kpc"]**2) * (
         cells["tau_hi_Myr"] - cells["tau_lo_Myr"])
     if not np.allclose(cell_fractions, cells["mass_fraction"], rtol=1e-10, atol=1e-12):
         raise ValueError("Kernel density does not integrate to its stored cell fractions")
@@ -371,13 +443,14 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         returned_radii, returned_delays, bins=(radius_edges, delay_edges),
         weights=[float(row["weight"]) / total_weight for row in returned],
     )
-    expected = density * np.diff(radius_edges)[:, None] * np.diff(delay_edges)[None, :]
-    if not np.allclose(measured, expected, rtol=1e-10, atol=1e-12):
+    area = np.pi * np.diff(radius_edges**2)
+    expected = density * area[:, None] * np.diff(delay_edges)[None, :]
+    if not np.allclose(measured, expected, rtol=1e-9, atol=1e-12):
         raise ValueError("Kernel cell fractions disagree with the returned parcels")
 
     # Integrate over the other coordinate; retain the original launch normalization.
-    radius_density = density @ np.diff(delay_edges)
-    delay_density = np.diff(radius_edges) @ density
+    radius_density = (density @ np.diff(delay_edges)) * area / np.diff(radius_edges)
+    delay_density = area @ density
     binned_fraction = float(radius_density @ np.diff(radius_edges))
     returned_weights = np.array([float(row["weight"]) for row in returned]) / total_weight
     returned_fraction = float(returned_weights.sum())
@@ -396,6 +469,72 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         "axes.formatter.limits": (-3, 4), "axes.formatter.use_mathtext": True,
         "savefig.bbox": None, "pdf.fonttype": 42,
     })
+    output_directory.mkdir(parents=True, exist_ok=True)
+    with (run_directory / "parameters.csv").open(newline="") as stream:
+        parameters = {row["parameter"]: row["value"] for row in csv.DictReader(stream)}
+
+    # The saved moments directly provide the paper's returned nuclear mass,
+    # newly condensed CGM mass, and mass-weighted landed angular momentum.
+    total_density = np.zeros_like(density)
+    angular_density = np.zeros_like(density)
+    total_density[radius_indices, delay_indices] = cells["K_mass_per_kpc2_per_Myr"]
+    angular_density[radius_indices, delay_indices] = cells["K_j_per_Myr2"]
+    new_density = total_density - density
+    difference_scale = max(float(total_density.max()), float(density.max()), 1.0)
+    if np.any(new_density < -1e-12 * difference_scale):
+        raise ValueError("Total-mass kernel is smaller than the returned-wind kernel")
+    new_density = np.maximum(new_density, 0.0)
+
+    radius_centers = 0.5 * (radius_edges[1:] + radius_edges[:-1])
+    _, gradient = potential_and_radial_gradient(radius_centers, 0.0, parameters)
+    if np.any(gradient <= 0) or not np.all(np.isfinite(gradient)):
+        raise ValueError("Kernel radii require finite, positive circular speeds")
+    circular_angular_momentum = radius_centers * np.sqrt(radius_centers * gradient)
+    landed_angular_momentum = np.divide(
+        angular_density, total_density, out=np.full_like(total_density, np.nan),
+        where=total_density > 0,
+    )
+    angular_ratio = landed_angular_momentum / circular_angular_momentum[:, None]
+    effective_entrainment = np.divide(
+        new_density, density, out=np.full_like(density, np.nan), where=density > 0,
+    )
+
+    moment_figure, moment_axes = diagnostic_page(2, 2)
+    scalar_panels = (
+        (moment_axes[0, 0], density, "magma", r"$K$ [kpc$^{-2}$ Myr$^{-1}$]"),
+        (moment_axes[0, 1], new_density, "magma", r"$K_{\rm new}$ [kpc$^{-2}$ Myr$^{-1}$]"),
+        (moment_axes[1, 1], effective_entrainment, "viridis", r"$\mu_{\rm eff}$"),
+    )
+    for ax, grid, color_map, label in scalar_panels:
+        positive = grid[np.isfinite(grid) & (grid > 0)]
+        if not positive.size:
+            raise ValueError(f"Cannot plot an all-zero {label} kernel")
+        lo, hi = float(positive.min()), float(positive.max())
+        norm = LogNorm(vmin=lo / 10 if lo == hi else lo, vmax=hi)
+        mesh = ax.pcolormesh(
+            radius_edges, delay_edges, np.ma.masked_where(~np.isfinite(grid.T) | (grid.T <= 0), grid.T),
+            cmap=color_map, norm=norm, shading="flat", rasterized=True,
+        )
+        ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
+        square_colorbar(mesh, ax, label)
+        if ax is moment_axes[0, 0]:
+            add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, norm)
+
+    ax = moment_axes[1, 0]
+    mesh = ax.pcolormesh(
+        radius_edges, delay_edges, np.ma.masked_invalid(angular_ratio.T),
+        cmap="RdBu_r", norm=SymLogNorm(linthresh=0.1, vmin=-2, vmax=2, base=10, clip=True),
+        shading="flat", rasterized=True,
+    )
+    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
+    square_colorbar(
+        mesh, ax, r"$j_{\rm land}(R,\tau)/[R_{\rm land}v_c(R_{\rm land})]$", extend="both",
+    )
+    save_diagnostics(
+        moment_figure, output_directory, "kernel_moments",
+        ("wind", "new_cgm", "landed_angular_momentum", "effective_entrainment"),
+    )
+
     if extra_panels:
         figure, axes = diagnostic_page(3, 4)
         velocity_ax, kernel_ax, angular_ax, median_ax = axes[0]
@@ -458,20 +597,10 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         radius_edges, delay_edges, np.ma.masked_equal(density.T, 0.0),
         cmap=color_map, shading="flat", norm=LogNorm(vmin=vmin, vmax=vmax), rasterized=True,
     )
-    square_colorbar(mesh, ax, label=r"$K(R_{\rm land},\tau)$ [kpc$^{-1}$ Myr$^{-1}$]")
+    square_colorbar(mesh, ax, label=r"$K(R_{\rm land},\tau)$ [kpc$^{-2}$ Myr$^{-1}$]")
     ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
 
-    ax.add_patch(Rectangle((0.39, 0.40), 0.59, 0.58, transform=ax.transAxes,
-                           facecolor="white", edgecolor="none", zorder=5))
-    zoom_ax = ax.inset_axes([0.52, 0.52, 0.43, 0.43], zorder=6)
-    zoom_ax.pcolormesh(
-        radius_edges, delay_edges, np.ma.masked_equal(density.T, 0.0),
-        cmap=color_map, norm=mesh.norm, shading="flat", rasterized=True,
-    )
-    zoom_ax.set(xlim=(0, 10), ylim=(0, 200), box_aspect=1,
-                xticks=(0, 5, 10), yticks=(0, 100, 200))
-    zoom_ax.tick_params(which="major", labelsize=6, length=2, pad=2)
-    zoom_ax.tick_params(which="minor", length=1)
+    add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, mesh.norm)
     plot_log_histogram(radius_ax, radius_density, radius_edges)
     radius_ax.set(
         xlabel=r"$R_{\rm land}$ [kpc]",
@@ -494,12 +623,8 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
     delay_ax.set_xlim(delay_edges[0], delay_limit)
 
     if extra_panels:
-        with (run_directory / "parameters.csv").open(newline="") as stream:
-            parameters = {row["parameter"]: row["value"] for row in csv.DictReader(stream)}
-        t_stop = float(parameters["t_stop_Myr"])
-
-        # Displacement and cumulative panels include ALL returns, even those
-        # outside the kernel grid. Their integrals retain all-launch normalization.
+        # Displacement includes all returns, even those outside the kernel grid.
+        # The paper-aligned CDFs below instead use the finite kernel domain.
         displacement = returned_radii - np.array([float(row["R0_kpc"]) for row in returned])
         ax = displacement_ax
         if returned:
@@ -538,22 +663,32 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         ax.set(xlabel=r"$v_k$ [km s$^{-1}$]", ylabel=r"$f_{\rm ret}$",
                xlim=(0, speed_edges[-1]), ylim=(0, 1.05))
 
-        for ax, values, label, cumulative_label, limit in (
-            (cumulative_radius_ax, returned_radii, r"$R_{\rm land}$ [kpc]", r"$f_{\rm ret}(<R_{\rm land})$",
-             max(radius_edges[-1], float(returned_radii.max())) if returned else radius_edges[-1]),
-            (cumulative_delay_ax, returned_delays, r"$\tau$ [Myr]", r"$f_{\rm ret}(<\tau)$", t_stop),
+        components = (
+            (r"Returned nuclear", r"f_{\rm ret}", density, (0, (4.0, 3.0))),
+            (r"New CGM", r"f_{\rm new}", new_density, (0, (0.1, 3.6))),
+            (r"Total landing", r"f_{\rm tot}", total_density, "-"),
+        )
+        for ax, coordinate, edges, xlabel, ylabel in (
+            (cumulative_radius_ax, "radius", radius_edges, r"$R_{\rm land}$ [kpc]",
+             r"$F_x(<R_{\rm land})/f_x$"),
+            (cumulative_delay_ax, "delay", delay_edges, r"$\tau$ [Myr]",
+             r"$F_x(<\tau)/f_x$"),
         ):
-            cumulative_mass, cumulative_edges = np.histogram(
-                values, bins=200, range=(0, limit), weights=returned_weights,
-            )
-            cumulative = np.r_[0.0, np.cumsum(cumulative_mass)]
-            if not np.isclose(cumulative[-1], returned_fraction, atol=1e-12, rtol=1e-10):
-                raise ValueError("Cumulative distribution lost returned mass")
-            ax.step(cumulative_edges, cumulative, where="post", color="black", linewidth=1.2)
-            ax.axhline(returned_fraction, color="black", linestyle="--", linewidth=1.2,
-                       label=f"All returns: {returned_fraction:.4%}")
-            ax.set(xlabel=label, ylabel=cumulative_label,
-                   xlim=(0, limit), ylim=(0, 1.05))
+            for name, symbol, grid, linestyle in components:
+                if coordinate == "radius":
+                    bin_mass = (grid @ np.diff(delay_edges)) * area
+                else:
+                    bin_mass = (area @ grid) * np.diff(delay_edges)
+                total = float(bin_mass.sum())
+                if total <= 0 or not np.isfinite(total):
+                    raise ValueError(f"Cannot normalize the {name} cumulative distribution")
+                cumulative = np.r_[0.0, np.cumsum(bin_mass)] / total
+                ax.step(
+                    edges, cumulative, where="post", color="black", linestyle=linestyle,
+                    linewidth=1.2, dash_capstyle="round",
+                    label=rf"{name}: ${symbol}={total:.6f}$",
+                )
+            ax.set(xlabel=xlabel, ylabel=ylabel, xlim=(edges[0], edges[-1]), ylim=(0, 1.05))
             ax.legend(loc="lower right")
 
         plot_physical_diagnostics(physical_axes, parcels, parameters, radius_edges)
@@ -568,7 +703,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_directory", type=Path, help="directory containing orbits.csv and kernel.csv")
+    parser.add_argument("run_directory", type=Path, help="directory containing orbits.csv.gz and kernel.csv")
     parser.add_argument("output_directory", type=Path, nargs="?", help="defaults to RUN_DIRECTORY/plots")
     parser.add_argument("--full-grid", action="store_true", help="show all radius and delay bins, including empty tails")
     args = parser.parse_args()

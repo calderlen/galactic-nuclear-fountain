@@ -1,0 +1,20 @@
+name,value,note
+Mdot_nuc_Msun_yr,,Required nuclear SFR in the launch region; never the global catalog SFR
+eta,1,Effective steady loading including pre-CGM survival and landing fraction
+R_nucl_kpc,1,Physical launch radius; edit for the galaxy
+R_in_kpc,,Blank uses max of launch radius and common data lower bound
+R_out_kpc,,Blank uses the supported upper disk radius
+v_c_nucl_kms,,Required if the launch radius lies outside measured rotation support
+mu,1,Steady CGM-to-wind mass ratio
+beta,0.75,CGM rotation fraction
+return_fraction,0.4,Instantaneous stellar returned fraction
+Mdot_out_Msun_yr,auto,Inverse boundary from forward solution; forward always reports actual flux
+Z_nucl,0.02,Illustrative total metal mass fraction
+Z_CGM,0.003,Illustrative total metal mass fraction
+yield_y,0.015,New metals per unit mass locked in stars
+Z_outer_boundary,0.006,Illustrative steady outer metallicity
+n_points,300,Radial output samples
+h_0_kpc,0.01,Initial steady RK4 step
+rtol,1e-9,Relative tolerance
+dynamics_atol,1e-18,Dynamics absolute tolerance
+metallicity_atol,1e-12,Metallicity absolute tolerance

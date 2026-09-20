@@ -55,6 +55,8 @@ TEXT_COLUMNS = {
     "H2_treatment",
     "bigiel2010_available",
     "profile_sources",
+    "stellar_sink",
+    "nuclear_SFR_origin",
 }
 
 SOURCE_COLORS = {
@@ -645,7 +647,7 @@ def plot_cumulative_landing(profiles, summary, output_directory):
     targets = {
         row["Mdot_land_Msun_yr"]
         for row in summary
-        if math.isfinite(row["Mdot_land_Msun_yr"]) and (evolving or row["mu"] != 0.0)
+        if math.isfinite(row["Mdot_land_Msun_yr"])
     }
     references = []
     for target in sorted(targets):
@@ -730,17 +732,6 @@ def plot_angular_momentum(profiles, rotations, summary, output_directory):
     if not all(math.isclose(value, j_nuc, rel_tol=1.0e-9) for value in nuclear_values):
         raise ValueError("j_nuc is not constant across the angular-momentum profile")
 
-    mixing_mu_values = {
-        row["mu"]
-        for row in summary
-        if row["source"] == profile_source and math.isfinite(row["mu"])
-    }
-    if len(mixing_mu_values) != 1:
-        raise ValueError("Expected exactly one configured mu for the selected profile")
-    mixing_mu = next(iter(mixing_mu_values))
-    if math.isclose(mixing_mu, -1.0):
-        raise ValueError("Cannot compute j_land,CGM for mu = -1")
-
     quantities = (
         ("j_disk_kpc_kms", r"$j(R)/j_{\rm nuc}$", "tab:blue"),
         (
@@ -756,18 +747,11 @@ def plot_angular_momentum(profiles, rotations, summary, output_directory):
         plotted_points.append((radius, values))
 
     radius, cgm = finite_xy(rows, angular_radius, "j_CGM_kpc_kms")
-    mixing = [
-        (j_nuc + mixing_mu * value) / ((1.0 + mixing_mu) * j_nuc)
-        for value in cgm
-    ]
-    axis.plot(
-        radius,
-        mixing,
-        color="tab:green",
-        linestyle="--",
-        label=r"$j_{\rm land,CGM}(R)/j_{\rm nuc}$",
-    )
-    plotted_points.append((radius, mixing))
+    if rows[0]["model"] in {"forward", "inverse"}:
+        mu = next(row["mu"] for row in summary if row["source"] == profile_source)
+        mixed = [(j_nuc + mu*value)/((1+mu)*j_nuc) for value in cgm]
+        axis.plot(radius, mixed, color="tab:green", linestyle="--", label=r"$j_{\rm land,mix}/j_{\rm nuc}$")
+        plotted_points.append((radius, mixed))
 
     cgm = [value / j_nuc for value in cgm]
     axis.plot(
@@ -859,11 +843,12 @@ def plot_mu(profiles, summary, output_directory):
     for index, (source, rows) in enumerate(profiles.items()):
         style = source_style(source, index, "color")
         angular_radius = "R_j_kpc" if math.isfinite(rows[0].get("R_j_kpc", math.nan)) else "R_kpc"
-        radius, mu_j = finite_xy(rows, angular_radius, "mu_j")
+        evolving = rows[0]["model"] in {"disk-evolution", "reconstruction", "forward-time", "inverse-time"}
+        radius, mu_j = finite_xy(rows, "R_kpc" if evolving else angular_radius, "mu_effective" if evolving else "mu_j")
         axis.plot(
             radius,
             mu_j,
-            label=r"$\mu_j$" + source_suffix(profiles, source),
+            label=(r"$\mu_{\rm eff}$" if evolving else r"$\mu_j$") + source_suffix(profiles, source),
             **style,
         )
         plotted_points.append((radius, mu_j))
@@ -1033,7 +1018,7 @@ def add_evolution_diagnostics(runs, initial_gas):
             row["gas_net"] = row["dSigma_g_dt_Msun_kpc2_Myr"] / 1e3
             # dZ/dt = (dSigma_Z/dt - Z*dSigma_g/dt)/Sigma_g,
             # retaining the solver's discrete face fluxes in both terms.
-            row["Z_landing"] = (row["Z_land_mixing"] - Z) * landing / gas * 1e9 if gas > 0 else math.nan
+            row["Z_landing"] = (row["Zdot_land_Msun_yr_kpc2"] - Z * landing) / gas * 1e9 if gas > 0 else math.nan
             row["Z_star"] = summary["yield_y"] * star / gas * 1e9 if gas > 0 else math.nan
             row["Z_transport"] = (metal_transport - Z * transport) / gas * 1e9 if gas > 0 else math.nan
             row["Z_net"] = row["dZ_dt_per_Myr"] * 1e3
@@ -1078,12 +1063,10 @@ def plot_evolution_histories(history, masses, parameters, burst_peak, output_dir
     reference = burst_peak if relative else 0.0
     xlabel = r"$t-t_{\rm peak}\;[\mathrm{Myr}]$" if relative else r"$t\;[\mathrm{Myr}]$"
     time = [row["t_Myr"] - reference for row in history]
-    mixed = parameters["landing_mass_origin"] == "nuclear_plus_cgm"
-    factor = 1.0 + float(parameters["mu"]) if mixed else 1.0
     curves = [([row["Mdot_launch_Msun_yr"] for row in history], r"$\dot{M}_{\rm launch}$", (0, (0.1, 3.6)), 1.3),
-              ([row["Mdot_land_Msun_yr"] / factor for row in history], r"$\dot{M}_{\rm ret,nuc}$", (0, (4.0, 3.0)), 1.0)]
-    if mixed:
-        curves.append(([row["Mdot_land_Msun_yr"] for row in history], r"$\dot{M}_{\rm land}$", "-", 1.0))
+              ([row["Mdot_wind_Msun_yr"] for row in history], r"$\dot{M}_{\rm ret,nuc}$", (0, (4.0, 3.0)), 1.0),
+              ([row["Mdot_CGM_Msun_yr"] for row in history], r"$\dot{M}_{\rm CGM}$", (0, (2.0, 2.0)), 1.0),
+              ([row["Mdot_land_Msun_yr"] for row in history], r"$\dot{M}_{\rm land}$", "-", 1.0)]
     recurrent = period > 0.0 and time[-1] - time[0] > 4.0 * period
     if recurrent:
         figure, (axis, detail) = plt.subplots(2, 1, figsize=(3.5, 4.6), sharey=True)
@@ -1110,7 +1093,7 @@ def plot_evolution_histories(history, masses, parameters, burst_peak, output_dir
         detail.set_ylabel(r"$\dot{M}\;[M_\odot\,\mathrm{yr}^{-1}]$")
         handles, labels = axis.get_legend_handles_labels()
         figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.59, 0.98),
-                      ncol=3, **TIME_LEGEND_STYLE)
+                      ncol=2, **TIME_LEGEND_STYLE)
     else:
         axis.legend(loc="upper right", **TIME_LEGEND_STYLE)
     if not recurrent and burst_peak is not None and time[-1] > 300:
@@ -1217,7 +1200,9 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
             ("j_land_kpc_kms", r"$j_{\rm land}$", "-")]),
         ("Z", r"$Z$", [("Z", r"$Z_{\rm disk}$", "-"),
                           ("Z_land_required", r"$Z_{\rm land}$", dashed)]),
-        ("mu", r"$\mu$", [("mu_j", r"$\mu_j$", "-"), ("mu_Z", r"$\mu_Z$", dotted)]),
+        ("mu", r"$\mu$", [("mu_effective", r"$\mu_{\rm eff}$", "-"), ("mu_Z", r"$\mu_Z$", dotted)]),
+        ("ell", r"$\ell\;[\mathrm{kpc}]$", [("ell_kpc", None, "-")]),
+        ("effective_accretion", SURFACE_RATE_LABEL, [("Sigmadot_eff_Eulerian_Msun_yr_kpc2", r"$\dot{\Sigma}_{\rm eff}$ (Eulerian)", "-")]),
     ]
     output_directory.mkdir(parents=True, exist_ok=True)
     for name, ylabel, quantities in specifications:
@@ -1237,14 +1222,14 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
         for column, curve_label, style in quantities:
             curves = []
             for _, rows, _ in runs:
-                radius_column = "R_j_kpc" if name == "j" or column == "mu_j" else "R_kpc"
+                radius_column = "R_j_kpc" if name in {"j", "ell"} else "R_kpc"
                 radius, values = finite_xy(rows, radius_column, column, positive=name in {"t", "surface_rates", "Sigma_g"})
                 if name == "j":
                     values = [value/rows[0]["j_nucl_kpc_kms"] for value in values]
-                elif name == "surface_rates":
+                elif name in {"surface_rates", "effective_accretion"}:
                     values = [value * SURFACE_RATE_PLOT_SCALE for value in values]
                 curves.append((radius, values))
-            fixed = (len(curves) > 1 or column in {"v_c_kms", "Sigmadot_star_Msun_yr_kpc2"}) and all(
+            fixed = (len(curves) > 1 or column == "v_c_kms") and all(
                 same_time_curve(curves[0], curve) for curve in curves[1:]
             )
             has_time_variation |= not fixed
@@ -1275,7 +1260,6 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
             "j": [("j_disk_kpc_kms", r"$j_{\rm disk}$", "-"),
                   ("j_CGM_kpc_kms", r"$j_{\rm CGM}$", "-")],
             "Z": [("Z_nucl", r"$Z_{\rm nuc}$", short_dashed), ("Z_CGM", r"$Z_{\rm CGM}$", long_dashed)],
-            "mu": [("mu", rf"$\mu={runs[0][2]['mu']:g}$", wide_dotted)],
         }.get(name, [])
         for column, label, style in reference_columns:
             linewidth = 1.0 if style in (dotted, wide_dotted) else 0.8

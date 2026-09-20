@@ -1,0 +1,48 @@
+name,value,note
+number_of_parcels,10000000,Illustrative settings; not fitted to a galaxy
+seed,42,
+M_d_Msun,6e10,
+a_d_kpc,3,
+b_d_kpc,0.3,
+M_b_Msun,1e10,
+a_b_kpc,0.7,
+rho_s_Msun_kpc3,8e6,
+r_s_kpc,20,
+rho_CGM_Msun_kpc3,1e4,Constant CGM density; set zero for ballistic motion
+parcel_sigma_kpc2,0.007853981633974483,Fixed cross-section of a 50 pc radius parcel
+parcel_m0_Msun,10000,Physical parcel mass; independent of Monte Carlo parcel count
+C_D,1,Illustrative quadratic drag coefficient
+epsilon,1,Illustrative condensation efficiency
+beta,0.75,CGM azimuthal velocity divided by circular speed
+R_ring_kpc,1,
+sigma_R_kpc,0.1,
+h_v_kms,150,
+sigma_theta_deg,15,
+Mdot_0_Msun_yr,0.1,Nuclear SFR baseline
+Mdot_b_Msun_yr,0.9,Nuclear SFR burst amplitude
+t_b_Myr,50,
+sigma_b_Myr,10,
+eta_nuc,1,Wind launch loading; no additional return factor
+burst_period_Myr,0,Zero selects one burst; positive repeats over all past times
+t_min_Myr,0,
+t_max_Myr,1050,
+dt_Myr,0.1,
+R_min_kpc,0,
+R_max_kpc,30,
+R_bins,300,
+tau_bins,1000,
+t_stop_Myr,1000,Finite flight cutoff; timeout is not escape
+h_0_Myr,0.01,
+h_max_Myr,1,
+atol,1e-9,
+rtol,1e-7,
+return_fraction,0.4,Illustrative stellar return fraction
+KS_A_SFR,9.95267926383743e-13,Raw SFR coefficient for Sigma_g in Msun/kpc^2 and SFR in Msun/yr/kpc^2
+KS_N,1.4,
+Z_nucl,0.02,
+Z_CGM,0.003,
+yield_y,0.015,New metal mass per net mass locked into stars
+inner_mass_flux_Msun_yr,0,Positive outward; negative inner flux feeds nucleus
+outer_mass_flux_Msun_yr,0,Positive outward; negative outer flux supplies disk
+Z_inner_inflow,0,Used only for incoming boundary gas
+Z_outer_inflow,0.003,Used only for incoming boundary gas

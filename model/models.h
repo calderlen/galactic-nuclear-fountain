@@ -8,16 +8,15 @@
 struct MassContinuityParameters {
     DoubleVec R_bins;   // annulus edges [kpc]
     DoubleVec tau_bins; // delay edges [Myr]
-    DoubleVec kernel;   // build_kernel density [kpc^-1 Myr^-1]
-    std::function<double(double)> Mdot_launch; // time [Myr] -> nuclear launch rate [Msun/yr]
-    RotationCurve rot_curve{}; // fixed circular rotation; velocity/derivative in consistent units
-    double R_nucl = 0.0; // [kpc], nuclear angular momentum is R_nucl*v_c(R_nucl)
-    double mu = 0.0;     // CGM/nuclear mass ratio; total deposition is (1+mu)*kernel deposition
-    double beta = 0.0;   // j_CGM/j_disk, as in j_land_mixing()
+    DoubleVec K_wind, K_mass, K_j; // area/delay densities; K_j carries kpc^2/Myr
+    std::function<double(double)> Mdot_launch; // Myr -> Msun/yr, eta_nuc*Mdot_nuc
+    RotationCurve rot_curve{}; // fixed circular rotation in kpc/Myr
+    double A = 0.0; // NET KS normalization: (1-return_fraction)*A_SFR
+    double N = 1.4;
     double Z_nucl = 0.02; // nuclear and CGM metal mass fractions, as in z_land_mixing()
     double Z_CGM = 0.003;
     double yield = 0.015; // newly produced metals per unit star-formation sink mass
-    DoubleVec sigmadot_star;              // [Msun/yr/kpc^2], length n
+    DoubleVec sigmadot_star; // saved instantaneous net KS sink for reconstruction [Msun/yr/kpc^2]
     // Signed fluxes through the two domain boundaries, positive toward increasing R.
     // Zero gives closed boundaries; negative inner flux removes gas into the nucleus.
     double inner_mass_flux = 0.0; // [Msun/yr]
@@ -26,26 +25,30 @@ struct MassContinuityParameters {
     double Z_outer_inflow = 0.0;
 };
 
+// Fixed parameters and matching grids/state sizes are established by the runner.
 // Advance one state containing n gas densities followed by n metal densities:
 // state = [Sigma_g[0..n-1], Sigma_Z[0..n-1]], Sigma_Z = Sigma_g*Z [Msun/kpc^2].
 // dSigma_i/dt = landing_i - star_i + (F_i - F_{i+1}) / area_i.
-// dSigma_Z_i/dt = Z_land*landing_i + (yield-Z_i)*star_i + (F_Z_i-F_Z_{i+1})/area_i.
+// dSigma_Z_i/dt = metal_source_i + (yield-Z_i)*star_i + (F_Z_i-F_Z_{i+1})/area_i.
 // Uses the existing rk4_step(), with shared upwind fluxes F = 2*pi*R*Sigma_upwind*v_R.
 // Metal flux is F_Z = F*Z_upwind, using that same stage's gas and metal densities.
-// Landing, mixing velocity, gas/metal transport and stellar terms are recomputed each stage.
-// v_R comes from j_land_mixing() and the current landing source/gas density, assuming
+// Landing moments, radial velocity, gas/metal transport and stellar terms are recomputed each stage.
+// v_R comes from the landing mass/angular-momentum sources and gas density, assuming
 // fixed j_disk(R), no additional torques, and star formation removing local disk j.
 // Sigma_g cancels in Sigma_g*v_R; the resulting flux is source-driven, not prescribed advection.
 // Rejects negative stage/final densities, Sigma_Z > Sigma_g and transport through empty donors;
 // reduce dt_Myr instead of clipping mass. Time steps must resolve the launch history.
 DoubleVec advance_mass_continuity(double t_Myr, double dt_Myr, const DoubleVec& state,
                                  const MassContinuityParameters& parameters);
-// Total nuclear+CGM landing source [Msun/yr/kpc^2].
-DoubleVec mass_continuity_landing_rate(double t_Myr, const MassContinuityParameters& parameters);
+// Net KS sinks evaluated from the gas densities at the current RK4 stage.
+DoubleVec mass_continuity_star(const DoubleVec& sigma_g, const MassContinuityParameters& parameters);
+// Wind/mass sources [Msun/yr/kpc^2], angular source times kpc^2/Myr.
+void mass_continuity_landing_sources(double t_Myr, const MassContinuityParameters& parameters,
+                                    DoubleVec& wind, DoubleVec& mass, DoubleVec& angular);
 // INTERNAL edge velocities [kpc/yr], positive outward. Interpolate the total landing
 // source from annulus midpoints to each edge and use the upwind stage gas density.
 DoubleVec mass_continuity_velocity(const DoubleVec& sigma_g, const DoubleVec& landing,
-                                  const MassContinuityParameters& parameters);
+                                  const DoubleVec& angular, const MassContinuityParameters& parameters);
 // RK4 derivative in Msun/kpc^2/Myr; parameters points to MassContinuityParameters.
 DoubleVec mass_continuity_rhs(double t_Myr, const DoubleVec& state, const void* parameters);
 
@@ -55,6 +58,7 @@ DoubleVec mass_continuity_rhs(double t_Myr, const DoubleVec& state, const void* 
 DoubleVec reconstruct_mass_flux(const DoubleVec& derivative, const DoubleVec& landing,
                                 const MassContinuityParameters& parameters);
 // The same upwind metal transport is used by evolution and reconstruction.
+// Densities are checked by the RK4 stage or snapshot loader before this call.
 DoubleVec disk_metal_flux(const DoubleVec& state, const DoubleVec& mass_flux,
                          const MassContinuityParameters& parameters);
 // Required incident composition from dSigma_Z/dt + div(F_Z) = Z_land*landing
@@ -69,7 +73,7 @@ struct InverseModelParameters {
     double A;
     double N;
     double Mdot_land;
-    double R_nucl;
+    double R_in;
     double R_out;
     double Mdot_out;
 };
@@ -104,6 +108,8 @@ struct ForwardModelParameters {
     RadialProfile sigma_g_derivative;
     RadialProfile sigmadot_star;
     RotationCurve rot_curve;
+    double R_in; // modeled disk edge, independent of the launch radius
+    double v_c_nucl; // explicit circular speed at the launch radius, in rotation-curve units
 };
 
 struct ForwardModelSolution {

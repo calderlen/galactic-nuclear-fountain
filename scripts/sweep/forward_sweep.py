@@ -66,8 +66,8 @@ RESULT_FIELDS = (
     "point_id",
     "mu",
     "beta",
-    "f_land",
-    "SFR_Msun_yr",
+    "eta",
+    "Mdot_nuc_Msun_yr",
     "Mdot_land_input_Msun_yr",
     "target_landing_applies",
     "rotation_source",
@@ -106,8 +106,8 @@ BEST_FIELDS = (
     "point_id",
     "mu",
     "beta",
-    "f_land",
-    "SFR_Msun_yr",
+    "eta",
+    "Mdot_nuc_Msun_yr",
     "Mdot_land_input_Msun_yr",
     "ranking_calibration",
     "mean_reduced_chi2_fixed_model",
@@ -120,13 +120,8 @@ BEST_FIELDS = (
 class SweepPoint:
     point_id: str
     mu: float
-    beta: float | None
-    f_land: float | None
-    planned_status: str
-
-    @property
-    def target_landing_applies(self) -> bool:
-        return self.mu != 0.0
+    beta: float
+    eta: float
 
 
 @dataclass(frozen=True)
@@ -179,33 +174,25 @@ def logarithmic_space(start: float, stop: float, count: int) -> list[float]:
 def build_grid(
     mu_values: Sequence[float],
     beta_values: Sequence[float],
-    f_land_values: Sequence[float],
+    eta_values: Sequence[float],
 ) -> list[SweepPoint]:
     unique_mu = list(dict.fromkeys(float(value) for value in mu_values))
     if any(value < 0.0 for value in unique_mu):
         raise ValueError("mu values must be nonnegative")
     if any(value < 0.0 or value > 1.0 for value in beta_values):
         raise ValueError("beta values must lie between 0 and 1")
-    if any(value <= 0.0 for value in f_land_values):
-        raise ValueError("f_land values must be positive")
 
     points: list[SweepPoint] = []
     sequence = 1
     for mu in unique_mu:
-        if mu == 0.0:
-            points.append(SweepPoint(f"p{sequence:06d}", mu, None, None, "pending"))
-            sequence += 1
-            continue
-        for beta in beta_values:
-            status = "singular_boundary" if math.isclose(beta, 1.0, rel_tol=0.0, abs_tol=1.0e-12) else "pending"
-            for f_land in f_land_values:
+        for beta in ([0.0] if mu == 0.0 else beta_values):
+            for eta in eta_values:
                 points.append(
                     SweepPoint(
                         f"p{sequence:06d}",
                         mu,
                         float(beta),
-                        float(f_land),
-                        status,
+                        float(eta),
                     )
                 )
                 sequence += 1
@@ -246,22 +233,15 @@ def write_csv(path: Path, fields: Sequence[str], rows: Iterable[dict[str, object
             writer.writerow({field: format_value(row.get(field)) for field in fields})
 
 
-def adopted_sfrs(path: Path, galaxies: Sequence[str]) -> dict[str, float]:
-    requested = set(galaxies)
-    result: dict[str, float] = {}
-    for row in read_csv(path):
-        galaxy = row["galaxy"]
-        if galaxy not in requested:
-            continue
-        sfr = parse_float(row.get("SFR_leroy_Msun_yr"))
-        if sfr is None:
-            sfr = parse_float(row.get("SFR_things_Msun_yr"))
-        if sfr is None:
-            raise ValueError(f"No Leroy or THINGS SFR is available for {galaxy}")
-        result[galaxy] = sfr
-    missing = requested - result.keys()
-    if missing:
-        raise ValueError(f"Galaxies missing from {path}: {', '.join(sorted(missing))}")
+def nuclear_sfrs(input_root: Path, galaxies: Sequence[str]) -> dict[str, float]:
+    result = {}
+    for galaxy in galaxies:
+        path = input_root / galaxy / "parameters.csv"
+        parameters = {row["name"]: row["value"] for row in read_csv(path)}
+        value = parse_float(parameters.get("Mdot_nuc_Msun_yr"))
+        if value is None:
+            raise ValueError(f"Set a nuclear SFR in {path}; re-export legacy inputs")
+        result[galaxy] = value
     return result
 
 
@@ -406,7 +386,7 @@ def write_parameter_input(
     destination: Path,
     mu: float,
     beta: float,
-    mdot_land: float,
+    eta: float,
     include_provenance: bool,
 ) -> None:
     destination.mkdir(parents=True, exist_ok=True)
@@ -414,11 +394,14 @@ def write_parameter_input(
     overrides = {
         "mu": format(mu, ".17g"),
         "beta": format(beta, ".17g"),
-        "Mdot_land_Msun_yr": format(mdot_land, ".17g"),
+        "eta": format(eta, ".17g"),
     }
     found: set[str] = set()
     for row in parameter_rows:
         name = row["name"]
+        if name == "Mdot_land_Msun_yr":
+            nuclear = next(float(item["value"]) for item in parameter_rows if item["name"] == "Mdot_nuc_Msun_yr")
+            row["value"] = format(eta*(1.0+mu)*nuclear, ".17g")
         if name in overrides:
             row["value"] = overrides[name]
             found.add(name)
@@ -460,11 +443,9 @@ def invoke_model(
     timeout_seconds: float,
     include_provenance: bool,
 ) -> subprocess.CompletedProcess[str]:
-    beta = 0.0 if point.beta is None else point.beta
-    mdot_land = sfr if point.f_land is None else point.f_land * sfr
     with tempfile.TemporaryDirectory(prefix=f"gnf-{point.point_id}-input-") as raw_input:
         input_directory = Path(raw_input)
-        write_parameter_input(base_input, input_directory, point.mu, beta, mdot_land, include_provenance)
+        write_parameter_input(base_input, input_directory, point.mu, point.beta, point.eta, include_provenance)
         return subprocess.run(
             [str(model_binary), "forward", str(input_directory), str(output_directory)],
             text=True,
@@ -490,7 +471,7 @@ def blank_result_row(
     status: str,
     error: str = "",
 ) -> dict[str, object]:
-    mdot_input = sfr if point.f_land is None else point.f_land * sfr
+    mdot_input = point.eta * (1.0 + point.mu) * sfr
     row: dict[str, object] = {field: None for field in RESULT_FIELDS}
     row.update(
         {
@@ -498,10 +479,10 @@ def blank_result_row(
             "point_id": point.point_id,
             "mu": point.mu,
             "beta": point.beta,
-            "f_land": point.f_land,
-            "SFR_Msun_yr": sfr,
+            "eta": point.eta,
+            "Mdot_nuc_Msun_yr": sfr,
             "Mdot_land_input_Msun_yr": mdot_input,
-            "target_landing_applies": point.target_landing_applies,
+            "target_landing_applies": True,
             "rotation_source": source,
             "calibration": calibration,
             "status": status,
@@ -523,7 +504,7 @@ def evaluate_model_output(
     profiles = rows_by_source(output_directory / "profiles.csv")
     summaries = {row["source"]: row for row in read_csv(output_directory / "summary.csv")}
     result_rows: list[dict[str, object]] = []
-    expected_target = None if point.f_land is None else point.f_land * sfr
+    expected_target = point.eta * (1.0 + point.mu) * sfr
 
     for source in sources:
         if source not in profiles or source not in summaries:
@@ -677,19 +658,11 @@ def run_galaxy_sweep(
         for calibration in CALIBRATIONS
     }
     rows: list[dict[str, object]] = []
-    executable_points = sum(point.planned_status == "pending" for point in points)
+    executable_points = len(points)
     completed = 0
     started = time.monotonic()
 
     for point in points:
-        if point.planned_status != "pending":
-            rows.extend(
-                result_rows_for_failure(
-                    galaxy, point, sfr, sources, point.planned_status, "beta=1 is singular for mu>0"
-                )
-            )
-            continue
-
         completed += 1
         try:
             with tempfile.TemporaryDirectory(prefix=f"gnf-{galaxy}-{point.point_id}-output-") as raw_output:
@@ -787,9 +760,9 @@ def retain_best_outputs(
                 "point_id": point.point_id,
                 "mu": point.mu,
                 "beta": point.beta,
-                "f_land": point.f_land,
-                "SFR_Msun_yr": sfr,
-                "Mdot_land_input_Msun_yr": sfr if point.f_land is None else point.f_land * sfr,
+                "eta": point.eta,
+                "Mdot_nuc_Msun_yr": sfr,
+                "Mdot_land_input_Msun_yr": point.eta * (1.0 + point.mu) * sfr,
                 "ranking_calibration": ranking_calibration,
                 "mean_reduced_chi2_fixed_model": ranked_point.score,
                 "rotation_scores": json.dumps(ranked_point.source_scores, sort_keys=True),
@@ -817,7 +790,7 @@ def plot_sweep_maps(
     rankings: dict[str, Sequence[RankedPoint]],
     mu_values: Sequence[float],
     beta_values: Sequence[float],
-    f_land_values: Sequence[float],
+    eta_values: Sequence[float],
 ) -> None:
     matplotlib_cache: tempfile.TemporaryDirectory[str] | None = None
     if "MPLCONFIGDIR" not in os.environ:
@@ -853,7 +826,7 @@ def plot_sweep_maps(
     score_cmap.set_bad("white")
     positive_mu = [value for value in mu_values if value > 0.0]
     point_by_coordinate = {
-        (point.mu, point.beta, point.f_land): point
+        (point.mu, point.beta, point.eta): point
         for point in points
         if point.mu > 0.0
     }
@@ -866,13 +839,13 @@ def plot_sweep_maps(
 
             figure, axes = plt.subplots(3, 4, figsize=(13, 10), constrained_layout=True)
             image = None
-            for axis, f_land in zip(axes.flat, f_land_values):
+            for axis, eta in zip(axes.flat, eta_values):
                 matrix = []
                 for mu in positive_mu:
                     matrix.append(
                         [
-                            math.log10(max(score_by_id[point_by_coordinate[(mu, beta, f_land)].point_id], 1.0e-300))
-                            if point_by_coordinate[(mu, beta, f_land)].point_id in score_by_id
+                            math.log10(max(score_by_id[point_by_coordinate[(mu, beta, eta)].point_id], 1.0e-300))
+                            if point_by_coordinate[(mu, beta, eta)].point_id in score_by_id
                             else math.nan
                             for beta in beta_values
                         ]
@@ -885,7 +858,7 @@ def plot_sweep_maps(
                     vmin=vmin,
                     vmax=vmax,
                 )
-                axis.set_title(rf"$f_{{\rm land}}={f_land:.3g}$")
+                axis.set_title(rf"$\eta={eta:.3g}$")
                 axis.set_xticks(range(0, len(beta_values), 3), [f"{beta_values[i]:.2g}" for i in range(0, len(beta_values), 3)])
                 axis.set_yticks(range(len(positive_mu)), [f"{value:g}" for value in positive_mu])
                 axis.set_xlabel(r"$\beta$")
@@ -902,7 +875,7 @@ def plot_sweep_maps(
             plt.close(figure)
 
             best_score_matrix: list[list[float]] = []
-            best_fland_matrix: list[list[float]] = []
+            best_eta_matrix: list[list[float]] = []
             invalid_matrix: list[list[float]] = []
             for mu in positive_mu:
                 score_row: list[float] = []
@@ -910,11 +883,11 @@ def plot_sweep_maps(
                 invalid_row: list[float] = []
                 for beta in beta_values:
                     candidates = [
-                        (score_by_id[point_by_coordinate[(mu, beta, f_land)].point_id], f_land)
-                        for f_land in f_land_values
-                        if point_by_coordinate[(mu, beta, f_land)].point_id in score_by_id
+                        (score_by_id[point_by_coordinate[(mu, beta, eta)].point_id], eta)
+                        for eta in eta_values
+                        if point_by_coordinate[(mu, beta, eta)].point_id in score_by_id
                     ]
-                    invalid_row.append(float(len(f_land_values) - len(candidates)))
+                    invalid_row.append(float(len(eta_values) - len(candidates)))
                     if candidates:
                         score, best_f = min(candidates)
                         score_row.append(math.log10(max(score, 1.0e-300)))
@@ -923,26 +896,26 @@ def plot_sweep_maps(
                         score_row.append(math.nan)
                         f_row.append(math.nan)
                 best_score_matrix.append(score_row)
-                best_fland_matrix.append(f_row)
+                best_eta_matrix.append(f_row)
                 invalid_matrix.append(invalid_row)
 
             figure, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
             panels = (
                 (
                     best_score_matrix,
-                    "Best absolute-fit score over $f_{land}$",
+                    r"Best absolute-fit score over $\eta$",
                     r"$\log_{10}(\widetilde{\chi^2_\nu})$",
                     vmin,
                     vmax,
                     score_cmap,
                 ),
-                (best_fland_matrix, "$f_{land}$ giving the best score", r"$f_{land}$", None, None, None),
+                (best_eta_matrix, r"$\eta$ giving the best score", r"$\eta$", None, None, None),
                 (
                     invalid_matrix,
-                    "Invalid landing fractions",
+                    "Invalid wind loadings",
                     "count",
                     0.0,
-                    float(len(f_land_values)),
+                    float(len(eta_values)),
                     None,
                 ),
             )
@@ -989,14 +962,14 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
         "--mu-values",
         type=parse_mu_values,
         default=list(DEFAULT_MU_VALUES),
-        help="Comma-separated mu values; mu=0 is run once",
+        help="Comma-separated mu values; mu=0 uses one beta and all eta values",
     )
     parser.add_argument("--beta-min", type=float, default=0.0)
     parser.add_argument("--beta-max", type=float, default=1.0)
     parser.add_argument("--beta-count", type=int, default=20)
-    parser.add_argument("--fland-min", type=float, default=0.1)
-    parser.add_argument("--fland-max", type=float, default=5.0)
-    parser.add_argument("--fland-count", type=int, default=12)
+    parser.add_argument("--eta-min", type=float, default=0.1)
+    parser.add_argument("--eta-max", type=float, default=5.0)
+    parser.add_argument("--eta-count", type=int, default=12)
     parser.add_argument("--keep-best", type=int, default=10)
     parser.add_argument("--ranking-calibration", choices=CALIBRATIONS, default="KK04")
     parser.add_argument(
@@ -1005,11 +978,6 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
         default=repo_root / "build" / "galactic-nuclear-fountain-model",
     )
     parser.add_argument("--input-root", type=Path, default=repo_root / "input" / "model_inputs")
-    parser.add_argument(
-        "--galaxy-catalog",
-        type=Path,
-        default=repo_root / "input" / "galaxies_triple_overlap.csv",
-    )
     parser.add_argument(
         "--metallicity-catalog",
         type=Path,
@@ -1028,8 +996,6 @@ def validate_paths(arguments: argparse.Namespace, galaxies: Sequence[str]) -> No
         raise FileNotFoundError(
             f"Model executable is missing: {arguments.model_binary}. Run `make` first."
         )
-    if not arguments.galaxy_catalog.is_file():
-        raise FileNotFoundError(arguments.galaxy_catalog)
     if not arguments.metallicity_catalog.is_file():
         raise FileNotFoundError(arguments.metallicity_catalog)
     for galaxy in galaxies:
@@ -1053,11 +1019,11 @@ def validate_paths(arguments: argparse.Namespace, galaxies: Sequence[str]) -> No
                 row["name"]: row["value"]
                 for row in read_csv(directory / "parameters.csv")
             }
-            r_nucl = float(parameters["R_nucl_kpc"])
+            r_in = float(parameters["R_in_kpc"])
             r_out = float(parameters["R_out_kpc"])
             for row in read_csv(rotation_profile_path):
                 radius = float(row["R_kpc"])
-                if not r_nucl <= radius <= r_out:
+                if not r_in <= radius <= r_out:
                     continue
                 velocity = float(row["V_kms"])
                 velocity_derivative = float(row["dV_dR_kms_kpc"])
@@ -1097,10 +1063,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         validate_paths(arguments, galaxies)
         beta_values = linear_space(arguments.beta_min, arguments.beta_max, arguments.beta_count)
-        f_land_values = logarithmic_space(arguments.fland_min, arguments.fland_max, arguments.fland_count)
+        eta_values = logarithmic_space(arguments.eta_min, arguments.eta_max, arguments.eta_count)
         mu_values = list(dict.fromkeys(arguments.mu_values))
-        points = build_grid(mu_values, beta_values, f_land_values)
-        sfrs = adopted_sfrs(arguments.galaxy_catalog, galaxies)
+        points = build_grid(mu_values, beta_values, eta_values)
+        sfrs = nuclear_sfrs(arguments.input_root, galaxies)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 
@@ -1113,12 +1079,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(
         f"Sweep grid: {len(points)} canonical points per galaxy; "
-        f"{sum(point.planned_status == 'pending' for point in points)} model runs per galaxy",
+        f"{len(points)} model runs per galaxy",
         flush=True,
     )
     for galaxy in galaxies:
         input_directory = arguments.input_root / galaxy
-        print(f"Starting {galaxy} with SFR={sfrs[galaxy]:.6g} Msun/yr", flush=True)
+        print(f"Starting {galaxy} with nuclear SFR={sfrs[galaxy]:.6g} Msun/yr", flush=True)
         rows, sources = run_galaxy_sweep(
             galaxy,
             points,
@@ -1165,7 +1131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rankings,
             mu_values,
             beta_values,
-            f_land_values,
+            eta_values,
         )
 
     manifest = {
@@ -1173,17 +1139,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command": [sys.executable, str(Path(__file__).resolve()), *(argv if argv is not None else sys.argv[1:])],
         "model_binary": str(arguments.model_binary.resolve()),
         "galaxies": galaxies,
-        "sfr_Msun_yr": sfrs,
+        "Mdot_nuc_Msun_yr": sfrs,
         "grid": {
             "mu": mu_values,
             "beta": beta_values,
-            "f_land": f_land_values,
-            "raw_cartesian_points_per_galaxy": len(mu_values) * len(beta_values) * len(f_land_values),
+            "eta": eta_values,
+            "raw_cartesian_points_per_galaxy": len(mu_values) * len(beta_values) * len(eta_values),
             "canonical_points_per_galaxy": len(points),
-            "executed_points_per_galaxy": sum(point.planned_status == "pending" for point in points),
-            "singular_boundary_points_per_galaxy": sum(point.planned_status == "singular_boundary" for point in points),
-            "mu_zero_policy": "one run; beta and requested f_land are not independent in the nonmixing limit",
-            "beta_one_policy": "record singular_boundary without executing for mu>0",
+            "executed_points_per_galaxy": len(points),
+            "mu_zero_policy": "one beta; all eta values; the solver rejects incompatible singular-boundary targets",
+            "beta_one_policy": "execute; singularity depends on R_in and the launch angular momentum",
         },
         "ranking": {
             "calibration": arguments.ranking_calibration,
@@ -1192,7 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "finite dynamics",
                 "v_R < 0 away from the mu=0 nuclear endpoint",
                 "nonnegative landing profile",
-                f"target landing relative error <= {TARGET_LANDING_RTOL:g} when mu>0",
+                f"target landing relative error <= {TARGET_LANDING_RTOL:g} for every point",
                 "solved metallicity profile",
                 "at least one overlapping metallicity observation",
             ],

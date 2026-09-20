@@ -1,0 +1,26 @@
+name,value,note
+profile_type,analytic,Illustrative exponential disk; not a galaxy fit
+galaxy,analytic,
+R_g_kpc,3,
+M_g_Msun,1e10,Gas mass between R_in and R_out
+KS_A_SFR,9.95267926383743e-13,Raw SFR normalization for gas in Msun/kpc2 and SFR in Msun/yr/kpc2
+KS_N,1.4,
+return_fraction,0.4,
+R_nucl_kpc,1,
+R_in_kpc,1.1,
+R_out_kpc,15,
+v_c_nucl_kms,200,
+Mdot_nuc_Msun_yr,1,Illustrative nuclear SFR
+eta,1,
+mu,1,
+beta,0.75,
+Mdot_out_Msun_yr,auto,
+Z_nucl,0.02,
+Z_CGM,0.003,
+yield_y,0.015,
+Z_outer_boundary,0.006,
+n_points,300,
+h_0_kpc,0.01,
+rtol,1e-9,
+dynamics_atol,1e-18,
+metallicity_atol,1e-12,

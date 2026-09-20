@@ -6,10 +6,6 @@ from collections import OrderedDict
 GALAXY_GROUPS = OrderedDict(
     (
         (
-            "gas_rich_dwarf_irregulars",
-            ("Gas-rich dwarf irregular", ("UGC4305",)),
-        ),
-        (
             "lower_intermediate_late_type_disks",
             (
                 "Lower/intermediate-mass late-type disks",

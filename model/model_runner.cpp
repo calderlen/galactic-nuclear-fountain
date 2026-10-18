@@ -1,7 +1,10 @@
 #include "models.h"
 #include "physics.h"
+#include "units.h"
 #include "profiles.h"
 #include "csv.h"
+#include "cgm_io.h"
+#include "prescribed_gas_io.h"
 
 #include <algorithm>
 #include <charconv>
@@ -30,7 +33,13 @@ using galactic_nuclear_fountain::csv::number;
 using galactic_nuclear_fountain::csv::read;
 using galactic_nuclear_fountain::csv::value;
 struct AnalyticProfileParameters {double R_g; double sigma_g0; double A; double N;};
-struct LandingProfileParameters {double Mdot_land; double R_in; double R_out;};
+struct LandingProfileParameters {
+    double Mdot_land, R_in, R_out, lambda;
+    std::string kind="power_law";
+    SmoothBrokenPowerLawParameters smooth{};
+    double normalization=std::numeric_limits<double>::quiet_NaN();
+    double fit_R_min=1.0, fit_R_max=15.0;
+};
 struct RotationInput {
     std::string source;
     std::string kind;
@@ -86,12 +95,27 @@ struct ModelResult {
     double rotation_reduced_chi2;
 };
 
+double surface_rate_number(const CsvRow& row,const std::string& column){
+    if (row.contains(column)) return number(row,column);
+    std::string legacy=column;
+    const auto marker=legacy.find("_Msun_Gyr_");
+    if (marker==std::string::npos) return number(row,column);
+    if (column.starts_with("dSigma_")) {
+        legacy.replace(marker,std::string::npos,"_Msun_kpc2_Myr");
+        return number(row,legacy)*units::myr_per_gyr;
+    }
+    legacy.replace(marker,10,"_Msun_yr_");
+    return units::per_gyr(number(row,legacy));
+}
+
 std::unordered_map<std::string,std::string> read_parameters(const std::filesystem::path& path){
     const CsvTable table=read(path);
     std::unordered_map<std::string,std::string> parameters;
     for (const CsvRow& row: table.rows) {
         parameters[value(row, row.contains("name") ? "name" : "parameter")]=value(row,"value");
     }
+    if (parameters.contains("surface_rate_time_unit") && parameters.at("surface_rate_time_unit")!="Gyr")
+        throw std::invalid_argument("Surface-rate and KS units must use Gyr");
     return parameters;
 }
 
@@ -116,6 +140,53 @@ std::vector<double> radial_grid(double start,double stop,std::size_t count){
     return grid;
 }
 
+void write_power_law_profiles(const std::filesystem::path& input,const std::filesystem::path& output){
+    const auto settings=read_parameters(input/"parameters.csv");
+    const double R_nucl=parameter_double(settings,"R_nucl_kpc");
+    const double A_net=parameter_double(settings,"KS_A_net",std::numeric_limits<double>::quiet_NaN());
+    const double A=std::isnan(A_net) ?
+        (1.0-parameter_double(settings,"return_fraction"))*parameter_double(settings,"KS_A_SFR") : A_net;
+    const PowerLawFountainParameters p{
+        R_nucl,parameter_double(settings,"R_in_kpc",R_nucl),parameter_double(settings,"R_out_kpc"),
+        parameter_double(settings,"Mdot_land_Msun_yr"),A,parameter_double(settings,"KS_N"),
+        parameter_double(settings,"lambda",2.0),parameter_double(settings,"Z_land"),
+        parameter_double(settings,"yield_y"),parameter_double(settings,"Z_outer_boundary")};
+    for (double value: {p.R_nucl,p.R_in,p.R_out,p.Mdot_land,p.A,p.N,p.lambda,p.Z_land,p.yield,p.Z_out}) {
+        if (!std::isfinite(value)) throw std::invalid_argument("Power-law parameters must be finite");
+    }
+    std::vector<double> radii;
+    if (std::filesystem::exists(input/"radii.csv")) {
+        for (const auto& row: read(input/"radii.csv").rows) radii.push_back(number(row,"R_kpc"));
+    } else {
+        const double count=parameter_double(settings,"n_points",1000.0);
+        if (!std::isfinite(count))
+            throw std::invalid_argument("n_points must be finite");
+        radii=radial_grid(p.R_in,p.R_out,static_cast<std::size_t>(count));
+    }
+    std::filesystem::create_directories(output);
+    std::ofstream stream(output/"profiles.csv");
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << std::setprecision(17)
+        << "R_kpc,Sigmadot_land_Msun_Gyr_kpc2,Sigmadot_star_Msun_Gyr_kpc2,Sigma_g_Msun_kpc2,v_R_kpc_yr,v_R_kms,Mdot_acc_Msun_yr,cumulative_landing_Msun_yr,Z,dZ_dR_per_kpc,j_land_over_j_disk\n";
+    const PowerLawDiskParameters disk_parameters{p.R_nucl,p.R_in,p.R_out,p.Mdot_land,p.A,p.N,p.lambda};
+    for (double R: radii) {
+        const auto row=power_law_fountain_profile(R,p);
+        stream << R << ',' << row.landing << ',' << row.star << ',' << row.gas << ','
+            << row.radial_velocity << ',' << row.radial_velocity*kpc_per_year_to_km_per_second << ','
+            << row.accretion << ',' << row.cumulative_landing << ',' << row.metallicity << ','
+            << row.metallicity_derivative << ','
+            << 1.0-power_law_transport_length(R,disk_parameters)/R << '\n';
+    }
+    std::ofstream resolved(output/"parameters.csv");
+    resolved.exceptions(std::ios::failbit | std::ios::badbit);
+    resolved << std::setprecision(17) << "name,value\n"
+        << "R_nucl_kpc," << p.R_nucl << "\nR_in_kpc," << p.R_in << "\nR_out_kpc," << p.R_out
+        << "\nMdot_land_Msun_yr," << p.Mdot_land << "\nKS_A_net," << p.A << "\nKS_N," << p.N
+        << "\nlambda," << p.lambda << "\nZ_land," << p.Z_land << "\nyield_y," << p.yield
+        << "\nZ_outer_boundary," << p.Z_out << '\n';
+    std::cout << "Wrote power-law profiles to " << output << '\n';
+}
+
 double analytic_gas(double R,const void* raw_parameters){
     const AnalyticProfileParameters& parameters=*static_cast<const AnalyticProfileParameters*>(raw_parameters);
     return sigma_g(R,parameters.R_g,parameters.sigma_g0);
@@ -133,7 +204,57 @@ double analytic_star(double R,const void* raw_parameters){
 
 double prescribed_landing(double R,const void* raw_parameters){
     const LandingProfileParameters& parameters=*static_cast<const LandingProfileParameters*>(raw_parameters);
-    return sigmadot_land(R,parameters.Mdot_land,parameters.R_in,parameters.R_out);
+    if (parameters.kind=="smooth_broken_power_law")
+        return parameters.Mdot_land/parameters.normalization*smooth_landing_shape(R,parameters.smooth);
+    return sigmadot_land(R,parameters.Mdot_land,parameters.R_in,parameters.R_out,parameters.lambda);
+}
+
+double prescribed_cumulative_landing(double R,const LandingProfileParameters& parameters){
+    if (R<=parameters.R_in) return 0.0;
+    if (R>=parameters.R_out) return parameters.Mdot_land;
+    if (parameters.kind=="smooth_broken_power_law")
+        return parameters.Mdot_land/parameters.normalization*
+            smooth_landing_integral(parameters.R_in,R,parameters.smooth);
+    return cumulative_mdot_land(R,parameters.Mdot_land,parameters.R_in,parameters.R_out,parameters.lambda);
+}
+
+void write_landing_profile(const std::filesystem::path& path,const LandingProfileParameters& p){
+    std::ofstream stream(path);
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << std::setprecision(17) << "name,value\nlanding_profile," << p.kind
+        << "\nMdot_land_Msun_yr," << p.Mdot_land << "\nR_in_kpc," << p.R_in
+        << "\nR_out_kpc," << p.R_out << '\n';
+    if (p.kind=="power_law") {
+        stream << "lambda," << p.lambda << '\n';
+    } else {
+        stream << "landing_lambda_in," << p.smooth.lambda_in
+            << "\nlanding_lambda_out," << p.smooth.lambda_out
+            << "\nlanding_R_break_kpc," << p.smooth.R_break
+            << "\nlanding_alpha," << p.smooth.alpha
+            << "\nshape_integral_kpc2," << p.normalization
+            << "\namplitude_at_break_Msun_Gyr_kpc2," << p.Mdot_land/p.normalization
+            << "\nlanding_fit_R_min_kpc," << p.fit_R_min
+            << "\nlanding_fit_R_max_kpc," << p.fit_R_max << '\n';
+    }
+}
+
+void write_landing_prescription(const std::filesystem::path& path,
+                               const LandingProfileParameters& p,double R_nucl,
+                               const std::vector<ProfileRow>& rows){
+    std::ofstream stream(path);
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << std::setprecision(17)
+        << "R_kpc,Sigmadot_land_Msun_Gyr_kpc2,cumulative_landing_Msun_yr,lambda_effective,"
+        << "fixed_j_flat_stellar_sink_ratio,fixed_j_flat_stellar_sink_Msun_Gyr_kpc2\n";
+    for (const auto& row: rows) {
+        const double slope=p.kind=="smooth_broken_power_law" ?
+            smooth_landing_log_slope(row.R,p.smooth) : p.lambda;
+        // This diagnoses the unmixed, flat-rotation j_land=j_nucl closure;
+        // it is separate from the supplied stellar sink in an inverse run.
+        const double ratio=power_law_stellar_sink_ratio(row.R,R_nucl,slope);
+        stream << row.R << ',' << row.landing << ',' << row.cumulative_landing
+            << ',' << slope << ',' << ratio << ',' << row.landing*ratio << '\n';
+    }
 }
 
 double empirical_inverse_velocity(double R,const void* raw_parameters){
@@ -145,22 +266,13 @@ RotationCurve make_rotation_curve(const RotationInput& input){
     if (input.kind=="flat") {
         return {{flat_rotation_velocity,&input.flat},{flat_rotation_velocity_derivative,&input.flat}};
     }
-    if (input.kind=="tabulated") {
-        return {{linear_profile_value,&input.tabulated_velocity},{linear_profile_value,&input.tabulated_derivative}};
-    }
-    throw std::runtime_error("Unknown rotation kind "+input.kind+" for "+input.source);
+    return {{linear_profile_value,&input.tabulated_velocity},{linear_profile_value,&input.tabulated_derivative}};
 }
 
 void validate_tabulated_profile(const LinearProfile& profile,const std::string& description){
-    if (profile.radius.size()<2 || profile.radius.size()!=profile.value.size()) {
-        throw std::runtime_error(description+" needs at least two matched radius/value rows");
-    }
     for (std::size_t index=0; index<profile.radius.size(); ++index) {
         if (!std::isfinite(profile.radius[index]) || !std::isfinite(profile.value[index])) {
             throw std::runtime_error(description+" contains non-finite values");
-        }
-        if (index>0 && profile.radius[index]<=profile.radius[index-1]) {
-            throw std::runtime_error(description+" radii must be strictly increasing");
         }
     }
 }
@@ -175,10 +287,6 @@ void load_tabulated_rotations(const std::filesystem::path& path,std::vector<Rota
     if (tabulated.empty()) {
         return;
     }
-    if (!std::filesystem::exists(path)) {
-        throw std::runtime_error("Tabulated rotation curves require "+path.string());
-    }
-
     const CsvTable table=read(path);
     for (const CsvRow& row: table.rows) {
         const std::string source=value(row,"source");
@@ -208,16 +316,11 @@ std::vector<RotationInput> read_rotations(const std::filesystem::path& path,cons
         input.kind=value(row,"kind");
         if (input.kind=="flat") {
             input.flat.velocity=number(row,"Vflat_kms");
-        } else if (input.kind!="tabulated") {
-            throw std::runtime_error("Unknown rotation kind "+input.kind+" for "+input.source);
         }
         input.chi2=number(row,"chi2");
         input.dof=number(row,"dof");
         input.reduced_chi2=number(row,"reduced_chi2");
         rotations.push_back(input);
-    }
-    if (rotations.empty()) {
-        throw std::runtime_error("No rotation curves found in "+path.string());
     }
     load_tabulated_rotations(profiles_path,rotations);
     return rotations;
@@ -228,31 +331,9 @@ const RotationInput& primary_rotation(const std::vector<RotationInput>& rotation
         const auto match=std::find_if(rotations.begin(),rotations.end(),[](const RotationInput& rotation){
             return rotation.source==primary_observational_rotation;
         });
-        if (match==rotations.end()) {
-            throw std::runtime_error(
-                std::string("Observational inputs require primary rotation source ")+
-                primary_observational_rotation
-            );
-        }
-        return *match;
+        if (match!=rotations.end()) return *match;
     }
     return rotations.front();
-}
-
-void validate_rotation_support(const std::vector<RotationInput>& rotations,double R_nucl,double R_out){
-    for (const RotationInput& rotation: rotations) {
-        if (rotation.kind!="tabulated") {
-            continue;
-        }
-        const double lower=rotation.tabulated_velocity.radius.front();
-        const double upper=rotation.tabulated_velocity.radius.back();
-        if (R_nucl<lower || R_out>upper) {
-            throw std::runtime_error(
-                rotation.source+" support ["+std::to_string(lower)+", "+
-                std::to_string(upper)+"] kpc does not cover the model range"
-            );
-        }
-    }
 }
 
 void load_tabulated_star_profile(const std::filesystem::path& path,LinearProfile& star){
@@ -260,9 +341,21 @@ void load_tabulated_star_profile(const std::filesystem::path& path,LinearProfile
     for (const CsvRow& row: table.rows) {
         const double radius=number(row,"R_kpc");
         star.radius.push_back(radius);
-        star.value.push_back(number(row,"Sigmadot_star_Msun_yr_kpc2"));
+        star.value.push_back(surface_rate_number(row,"Sigmadot_star_Msun_Gyr_kpc2"));
     }
     validate_tabulated_profile(star,"Leroy star-formation profile");
+}
+
+void load_observed_metallicity(const std::filesystem::path& path,LinearProfile& metallicity,LinearProfile& derivative){
+    for (const CsvRow& row: read(path).rows) {
+        const double R=number(row,"R_kpc");
+        metallicity.radius.push_back(R);
+        metallicity.value.push_back(number(row,"Z"));
+        derivative.radius.push_back(R);
+        derivative.value.push_back(number(row,"dZ_dR_per_kpc"));
+    }
+    validate_tabulated_profile(metallicity,"Observed metallicity profile");
+    validate_tabulated_profile(derivative,"Observed metallicity derivative");
 }
 
 void load_tabulated_gas_profiles(
@@ -285,12 +378,16 @@ void load_tabulated_gas_profiles(
 void write_profiles(const std::filesystem::path& path,const std::vector<ModelResult>& results){
     std::ofstream stream(path);
     stream.exceptions(std::ios::failbit | std::ios::badbit);
-    stream << "model,source,R_kpc,Sigma_g_Msun_kpc2,Sigmadot_star_Msun_yr_kpc2,Sigmadot_land_Msun_yr_kpc2,cumulative_landing_Msun_yr,v_R_kpc_yr,v_R_kms,F_R_Msun_yr,Mdot_acc_Msun_yr,t_inflow_Gyr,t_depletion_Gyr,v_c_kms,dv_c_dR_kms_kpc,j_disk_kpc_kms,j_CGM_kpc_kms,j_land_kpc_kms,delta_j_kpc_kms,j_land_over_j_disk,j_land_over_j_nucl,mu_j,Z,Z_eq,dZ_dR_per_kpc,Z_land_required,mu_Z,t_Myr,R_lo_kpc,R_hi_kpc,dSigma_g_dt_Msun_kpc2_Myr,dSigma_Z_dt_Msun_kpc2_Myr,dZ_dt_per_Myr,mass_flux_inner_Msun_yr,mass_flux_outer_Msun_yr,metal_flux_inner_Msun_yr,metal_flux_outer_Msun_yr,v_R_outer_kpc_yr,j_land_supplied_kpc_kms,Z_land_supplied,j_nucl_kpc_kms,R_j_kpc,Sigmadot_wind_Msun_yr_kpc2,Sigmadot_CGM_Msun_yr_kpc2,Jdot_land_Msun_yr_Myr,Zdot_land_Msun_yr_kpc2,mu_effective,ell_kpc,Sigmadot_eff_Eulerian_Msun_yr_kpc2\n";
+    stream << "model,source,R_kpc,Sigma_g_Msun_kpc2,Sigmadot_star_Msun_Gyr_kpc2,Sigmadot_land_Msun_Gyr_kpc2,cumulative_landing_Msun_yr,v_R_kpc_yr,v_R_kms,F_R_Msun_yr,Mdot_acc_Msun_yr,t_inflow_Gyr,t_depletion_Gyr,v_c_kms,dv_c_dR_kms_kpc,j_disk_kpc_kms,j_CGM_kpc_kms,j_land_kpc_kms,delta_j_kpc_kms,j_land_over_j_disk,j_land_over_j_nucl,mu_j,Z,Z_eq,dZ_dR_per_kpc,Z_land_required,mu_Z,t_Myr,R_lo_kpc,R_hi_kpc,dSigma_g_dt_Msun_Gyr_kpc2,dSigma_Z_dt_Msun_Gyr_kpc2,dZ_dt_per_Myr,mass_flux_inner_Msun_yr,mass_flux_outer_Msun_yr,metal_flux_inner_Msun_yr,metal_flux_outer_Msun_yr,v_R_outer_kpc_yr,j_land_supplied_kpc_kms,Z_land_supplied,j_nucl_kpc_kms,R_j_kpc,Sigmadot_wind_Msun_Gyr_kpc2,Sigmadot_CGM_Msun_Gyr_kpc2,Jdot_land_Msun_Gyr_Myr,Zdot_land_Msun_Gyr_kpc2,mu_effective,ell_kpc,Sigmadot_eff_Eulerian_Msun_Gyr_kpc2\n";
     stream << std::setprecision(17);
     for (const ModelResult& result: results) {
         for (const ProfileRow& row: result.profiles) {
             stream << escape(row.model) << ',' << escape(row.source) << ',' << row.R << ',' << row.gas << ',' << row.star << ',' << row.landing << ',' << row.cumulative_landing << ',' << row.radial_velocity << ',' << row.radial_velocity_kms << ',' << row.radial_mass_flux << ',' << row.accretion << ',' << row.inflow_time << ',' << row.depletion_time << ',' << row.circular_velocity << ',' << row.circular_velocity_derivative << ',' << row.disk_angular_momentum << ',' << row.cgm_angular_momentum << ',' << row.landing_angular_momentum << ',' << row.angular_momentum_difference << ',' << row.landing_to_disk << ',' << row.landing_to_nuclear << ',' << row.mu_angular_momentum << ',' << row.metallicity << ',' << row.equilibrium_metallicity << ',' << row.metallicity_derivative << ',' << row.required_landing_metallicity << ',' << row.mu_metallicity;
-            for (std::size_t i=0; i<22; ++i) stream << ',' << (row.time_columns.empty() ? std::numeric_limits<double>::quiet_NaN() : row.time_columns.at(i));
+            for (std::size_t i=0; i<22; ++i) {
+                double value=row.time_columns.empty() ? std::numeric_limits<double>::quiet_NaN() : row.time_columns.at(i);
+                if (i==3 || i==4) value*=units::myr_per_gyr;
+                stream << ',' << value;
+            }
             stream << '\n';
         }
     }
@@ -303,14 +400,14 @@ bool landing_nonnegative(const ModelResult& result){
         minimum_landing=std::min(minimum_landing,row.landing);
         maximum_absolute_landing=std::max(maximum_absolute_landing,std::abs(row.landing));
     }
-    const double tolerance=1e-10*std::max(maximum_absolute_landing,1.0);
+    const double tolerance=1e-10*std::max(maximum_absolute_landing,units::per_gyr(1.0));
     return minimum_landing>=-tolerance;
 }
 
 void write_summary(const std::filesystem::path& path,const std::string& model,const std::string& profile_type,const std::string& galaxy,const std::vector<ModelResult>& results,double R_nucl,double R_out,double Mdot_land,double Mdot_out,double mu,double beta,double Z_nucl,double Z_CGM,double yield,double Z_boundary,double R_Z_boundary,bool metallicity_solved,double t_Myr=std::numeric_limits<double>::quiet_NaN(),double R_min=std::numeric_limits<double>::quiet_NaN()){
     std::ofstream stream(path);
     stream.exceptions(std::ios::failbit | std::ios::badbit);
-    stream << "model,profile_type,galaxy,source,R_nucl_kpc,R_out_kpc,Mdot_land_Msun_yr,Mdot_out_Msun_yr,mu,beta,Z_nucl,Z_CGM,yield_y,Z_outer_boundary,R_Z_boundary_kpc,metallicity_solved,total_landing_Msun_yr,initial_radial_velocity_kpc_yr,initial_landing_rate_Msun_yr_kpc2,chi2,dof,reduced_chi2,landing_nonnegative,t_Myr,R_min_kpc\n";
+    stream << "model,profile_type,galaxy,source,R_nucl_kpc,R_out_kpc,Mdot_land_Msun_yr,Mdot_out_Msun_yr,mu,beta,Z_nucl,Z_CGM,yield_y,Z_outer_boundary,R_Z_boundary_kpc,metallicity_solved,total_landing_Msun_yr,initial_radial_velocity_kpc_yr,initial_landing_rate_Msun_Gyr_kpc2,chi2,dof,reduced_chi2,landing_nonnegative,t_Myr,R_min_kpc\n";
     stream << std::setprecision(17);
     for (const ModelResult& result: results) {
         stream << escape(model) << ',' << escape(profile_type) << ',' << escape(galaxy) << ',' << escape(result.source) << ',' << R_nucl << ',' << R_out << ',' << Mdot_land << ',' << (model=="forward" ? result.profiles.back().accretion : Mdot_out) << ',' << mu << ',' << beta << ',' << Z_nucl << ',' << Z_CGM << ',' << yield << ',' << Z_boundary << ',' << R_Z_boundary << ',' << (metallicity_solved ? 1 : 0) << ',' << result.total_landing << ',' << result.initial_radial_velocity << ',' << result.initial_landing_rate << ',' << result.rotation_chi2 << ',' << result.rotation_dof << ',' << result.rotation_reduced_chi2 << ',' << (landing_nonnegative(result) ? "true" : "false") << ',' << t_Myr << ',' << R_min << '\n';
@@ -329,9 +426,7 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
                              const std::filesystem::path& output,DoubleVec times){
     const double nan=std::numeric_limits<double>::quiet_NaN();
     const auto parameters=read_parameters(input/"parameters.csv");
-    if (parameter_string(parameters,"landing_mass_origin","")!="nuclear_plus_cgm") {
-        throw std::runtime_error("Time snapshots require a kernel run with an initial disk with nuclear+CGM landing rates");
-    }
+    const auto cgm_solution=load_cgm(parameters);
     const auto finite=[](const CsvRow& row,const char* key){
         const double result=number(row,key);
         if (!std::isfinite(result)) throw std::runtime_error(std::string("Snapshot needs finite ")+key+"; regenerate older kernel outputs with the current config and initial disk");
@@ -342,14 +437,12 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
     std::map<double,std::vector<const CsvRow*>> gas_times,landing_times;
     for (const auto& row: gas_table.rows) gas_times[finite(row,"t_Myr")].push_back(&row);
     for (const auto& row: landing_table.rows) landing_times[finite(row,"t_Myr")].push_back(&row);
-    if (gas_times.empty()) throw std::runtime_error("No evolving disk snapshots found");
     if (times.empty()) times.push_back(gas_times.rbegin()->first);
     // Resolve only saved times; never silently treat an interpolated state as a saved snapshot.
     for (double& t: times) {
         const auto match=std::find_if(gas_times.begin(),gas_times.end(),[&](const auto& entry){
             return std::abs(entry.first-t)<=1e-10*std::max(1.0,std::abs(t));
         });
-        if (match==gas_times.end()) throw std::runtime_error("Requested time is not saved: "+std::to_string(t)+" Myr");
         t=match->first;
     }
     std::sort(times.begin(),times.end());
@@ -362,10 +455,9 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
         std::sort(rows.begin(),rows.end(),by_radius);
         std::sort(landing_rows.begin(),landing_rows.end(),by_radius);
         const std::size_t n=rows.size();
-        if (n!=landing_rows.size()) throw std::runtime_error("Gas and landing snapshots have different annuli");
         MassContinuityParameters p;
         const double R_nucl=parameter_double(parameters,"R_nucl_kpc");
-        const double beta=parameter_double(parameters,"beta");
+        const double beta=cgm_solution ? nan : parameter_double(parameters,"beta");
         const double velocity_conversion=parameter_double(parameters,"kms_to_kpc_per_Myr");
         p.Z_nucl=parameter_double(parameters,"Z_nucl");
         p.Z_CGM=parameter_double(parameters,"Z_CGM");
@@ -381,10 +473,8 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
         for (std::size_t i=0; i<n; ++i) {
             const auto& row=*rows[i];
             const double lo=finite(row,"R_lo_kpc"),hi=finite(row,"R_hi_kpc");
-            if (lo<0.0 || hi<=lo || (i>0 && lo!=p.R_bins.back()) ||
-                lo!=finite(*landing_rows[i],"R_lo_kpc") || hi!=finite(*landing_rows[i],"R_hi_kpc")) {
-                throw std::runtime_error("Snapshot annuli must be contiguous and match the landing grid");
-            }
+            finite(*landing_rows[i],"R_lo_kpc");
+            finite(*landing_rows[i],"R_hi_kpc");
             if (i==0) p.R_bins.push_back(lo);
             p.R_bins.push_back(hi);
             radius[i]=0.5*(lo+hi);
@@ -394,13 +484,13 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
             if (state[i]<0.0 || state[n+i]<0.0 || state[n+i]>state[i]) {
                 throw std::runtime_error("Snapshot densities must satisfy 0 <= Sigma_Z <= Sigma_g");
             }
-            derivative[i]=finite(row,"dSigma_g_dt_Msun_kpc2_Myr");
-            derivative[n+i]=finite(row,"dSigma_Z_dt_Msun_kpc2_Myr");
-            p.sigmadot_star.push_back(finite(row,"Sigmadot_star_Msun_yr_kpc2"));
-            landing[i]=finite(*landing_rows[i],"Sigmadot_land_Msun_yr_kpc2");
-            wind[i]=finite(*landing_rows[i],"Sigmadot_wind_Msun_yr_kpc2");
-            angular[i]=finite(*landing_rows[i],"Jdot_land_Msun_yr_Myr");
-            metals[i]=finite(*landing_rows[i],"Zdot_land_Msun_yr_kpc2");
+            derivative[i]=surface_rate_number(row,"dSigma_g_dt_Msun_Gyr_kpc2")/units::myr_per_gyr;
+            derivative[n+i]=surface_rate_number(row,"dSigma_Z_dt_Msun_Gyr_kpc2")/units::myr_per_gyr;
+            p.sigmadot_star.push_back(surface_rate_number(row,"Sigmadot_star_Msun_Gyr_kpc2"));
+            landing[i]=surface_rate_number(*landing_rows[i],"Sigmadot_land_Msun_Gyr_kpc2");
+            wind[i]=surface_rate_number(*landing_rows[i],"Sigmadot_wind_Msun_Gyr_kpc2");
+            angular[i]=surface_rate_number(*landing_rows[i],"Jdot_land_Msun_Gyr_Myr");
+            metals[i]=surface_rate_number(*landing_rows[i],"Zdot_land_Msun_Gyr_kpc2");
             vc[i]=finite(row,"v_c_kms");
             dvc[i]=finite(row,"dv_c_dR_kms_kpc");
             edge_velocity[i]=model=="disk-evolution" && i+1<n ? finite(row,"v_R_outer_kpc_yr") : 0.0;
@@ -435,13 +525,14 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
             const double velocity=divide(F,2.0*pi*R*state[i]);
             // Angular-momentum closure lives on internal faces, like the solver's
             // transport. R_j_kpc records this staggered sampling explicitly.
-            const double disk=j_disk(hi,edge_vc[i]),cgm=j_cgm(hi,beta,edge_vc[i]);
+            const double disk=j_disk(hi,edge_vc[i]);
+            const double cgm=cgm_solution ? cgm_j_kpc_kms(hi,&*cgm_solution) : j_cgm(hi,beta,edge_vc[i]);
             const double weight=i+1<n ? (hi-lo)/(p.R_bins[i+2]-lo) : 0.0;
             const double face_landing=i+1<n ? (1.0-weight)*landing[i]+weight*landing[i+1] : 0.0;
             const double face_angular=i+1<n ? (1.0-weight)*angular[i]+weight*angular[i+1] : 0.0;
             const double supplied_j=divide(face_angular,face_landing*velocity_conversion);
             const double Z_land=divide(metals[i],landing[i]);
-            const double required_j=face_landing>0.0 ? disk+flux[i+1]/(2.0*pi*hi*face_landing)*dj_disk_dR(hi,edge_vc[i],edge_dvc[i]) : nan;
+            const double required_j=face_landing>0.0 ? disk+units::per_gyr(flux[i+1])/(2.0*pi*hi*face_landing)*dj_disk_dR(hi,edge_vc[i],edge_dvc[i]) : nan;
             const double incident_j=face_landing>0.0 ? (model=="reconstruction" ? required_j : supplied_j) : nan;
             const std::size_t left=i==0 ? 0 : i-1,right=i+1<n ? i+1 : i;
             const double dZ_dR=divide(Z[right]-Z[left],radius[right]-radius[left]);
@@ -450,23 +541,22 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
             if (i+1<n) outer_velocity=divide(flux[i+1],2.0*pi*hi*state[flux[i+1]>=0.0 ? i : i+1]);
             else if (flux.back()==0.0) outer_velocity=0.0;
             else if (flux.back()>0.0) outer_velocity=divide(flux.back(),2.0*pi*hi*state[i]);
-            const double cumulative_at_R=cumulative+inner_area*landing[i];
-            cumulative+=area[i]*landing[i];
+            const double cumulative_at_R=cumulative+units::per_year(inner_area*landing[i]);
+            cumulative+=units::per_year(area[i]*landing[i]);
             result.profiles.push_back({model,result.source,R,state[i],p.sigmadot_star[i],landing[i],cumulative_at_R,
                 velocity,velocity*kpc_per_year_to_km_per_second,F/(2.0*pi),-F,
-                divide(R,std::abs(velocity))/1e9,divide(state[i],p.sigmadot_star[i])/1e9,vc[i],dvc[i],disk,cgm,
+                divide(R,std::abs(velocity))/1e9,divide(state[i],p.sigmadot_star[i]),vc[i],dvc[i],disk,cgm,
                 incident_j,incident_j-disk,divide(incident_j,disk),divide(incident_j,j_nucl),
                 nan,Z[i],landing[i]>0.0 ? Z_land+p.yield*p.sigmadot_star[i]/landing[i] : nan,
                 dZ_dR,required_Z[i],divide(required_Z[i]-p.Z_nucl,p.Z_CGM-required_Z[i]),
                 {t,lo,hi,derivative[i],derivative[n+i],dZ_dt,flux[i],flux[i+1],metal_flux[i],metal_flux[i+1],outer_velocity,supplied_j,Z_land,j_nucl,hi,
                  wind[i],landing[i]-wind[i],angular[i],metals[i],divide(landing[i]-wind[i],wind[i]),
-                 divide(supplied_j-disk,dj_disk_dR(hi,edge_vc[i],edge_dvc[i])),derivative[i]/1e6+p.sigmadot_star[i]}});
+                 divide(supplied_j-disk,dj_disk_dR(hi,edge_vc[i],edge_dvc[i])),derivative[i]*units::myr_per_gyr+p.sigmadot_star[i]}});
         }
         result.total_landing=cumulative;
         result.initial_radial_velocity=result.profiles.front().radial_velocity;
         char buffer[64];
         const auto converted=std::to_chars(buffer,buffer+sizeof(buffer),t);
-        if (converted.ec!=std::errc{}) throw std::runtime_error("Cannot format snapshot time");
         const std::string directory="t_"+std::string(buffer,converted.ptr)+"_Myr";
         const auto destination=output/directory;
         std::filesystem::create_directories(destination);
@@ -478,6 +568,7 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
         rotations.exceptions(std::ios::failbit | std::ios::badbit);
         rotations << "source,kind,Vflat_kms,lflat_kpc,chi2,dof,reduced_chi2\norbit_potential,tabulated,nan,nan,nan,nan,nan\n";
         copy_if_present(input/"parameters.csv",destination/"parameters.csv");
+        if (cgm_solution) write_cgm_profile(destination,*cgm_solution);
         std::ofstream provenance(destination/"snapshot.csv");
         provenance.exceptions(std::ios::failbit | std::ios::badbit);
         provenance << std::setprecision(17) << "parameter,value\ninput_directory," << escape(std::filesystem::absolute(input).string())
@@ -494,15 +585,112 @@ void write_evolving_snapshots(const std::string& model,const std::filesystem::pa
     std::cout << "Wrote " << times.size() << " " << model << " snapshots to " << output << '\n';
 }
 
+double power_law_disk_gas(double R,const void* raw){
+    return power_law_disk_profile(R,*static_cast<const PowerLawDiskParameters*>(raw)).gas;
+}
+double power_law_disk_star(double R,const void* raw){
+    return power_law_disk_profile(R,*static_cast<const PowerLawDiskParameters*>(raw)).star;
+}
+double power_law_disk_landing(double R,const void* raw){
+    return power_law_disk_profile(R,*static_cast<const PowerLawDiskParameters*>(raw)).landing;
+}
+double power_law_disk_velocity(double R,const void* raw){
+    return power_law_disk_profile(R,*static_cast<const PowerLawDiskParameters*>(raw)).radial_velocity;
+}
+
+void write_mixed_power_law_profiles(const std::filesystem::path& input,const std::filesystem::path& output){
+    const auto settings=read_parameters(input/"parameters.csv");
+    if (parameter_string(settings,"closure","")!="j_mix" ||
+        parameter_string(settings,"landing_profile","")!="power_law" ||
+        parameter_string(settings,"cgm_model","")!="constant_beta" ||
+        parameter_string(settings,"rotation_model","")!="flat")
+        throw std::invalid_argument("Require j_mix closure, power-law landing, constant-beta CGM and flat rotation");
+    for (const char* key: {"R_g_kpc","M_g_Msun","Mdot_out_Msun_yr","profile_type","metallicity_mode"}) {
+        if (settings.contains(key))
+            throw std::invalid_argument(std::string(key)+" is not an input to the mixed power-law disk");
+    }
+    const double mu=parameter_double(settings,"mu");
+    const double beta=parameter_double(settings,"beta");
+    const double eta=parameter_double(settings,"eta");
+    const double nuclear_rate=parameter_double(settings,"Mdot_nuc_Msun_yr");
+    const double returned=parameter_double(settings,"return_fraction");
+    if (!(std::isfinite(eta) && eta>0.0 && std::isfinite(nuclear_rate) && nuclear_rate>0.0 &&
+          std::isfinite(returned) && returned>=0.0 && returned<1.0))
+        throw std::invalid_argument("Require positive eta/source rate and 0 <= return_fraction < 1");
+    const PowerLawDiskParameters p{
+        parameter_double(settings,"R_nucl_kpc"),parameter_double(settings,"R_in_kpc"),
+        parameter_double(settings,"R_out_kpc"),eta*(1.0+mu)*nuclear_rate,
+        (1.0-returned)*parameter_double(settings,"KS_A_SFR"),parameter_double(settings,"KS_N"),
+        parameter_double(settings,"lambda"),mu,beta};
+    validate_power_law_disk(p);
+    if (power_law_transport_length(p.R_in,p)<=0.0 || power_law_transport_length(p.R_out,p)<=0.0)
+        throw std::invalid_argument("The mixed metallicity solve requires inward transport throughout the annulus");
+    const double vc=parameter_double(settings,"v_c_nucl_kms");
+    const double Z_nucl=parameter_double(settings,"Z_nucl");
+    const double Z_CGM=parameter_double(settings,"Z_CGM");
+    const double yield=parameter_double(settings,"yield_y");
+    const double Z_out=parameter_double(settings,"Z_outer_boundary");
+    const double count=parameter_double(settings,"n_points");
+    const double h0=parameter_double(settings,"h_0_kpc");
+    const double rtol=parameter_double(settings,"rtol");
+    const double atol=parameter_double(settings,"metallicity_atol");
+    for (double value: {vc,Z_nucl,Z_CGM,yield,Z_out,count,h0,rtol,atol}) {
+        if (!std::isfinite(value)) throw std::invalid_argument("Mixed disk parameters must be finite");
+    }
+    if (vc<=0.0 || Z_nucl<0.0 || Z_nucl>1.0 || Z_CGM<0.0 || Z_CGM>1.0 ||
+        yield<0.0 || Z_out<0.0 || Z_out>1.0 || count<2.0 || count>1000000.0 ||
+        std::floor(count)!=count || h0<=0.0 || rtol<=0.0 || atol<=0.0)
+        throw std::invalid_argument("Invalid rotation, chemistry, grid or integration controls");
+    const double Z_land=z_land_mixing(Z_nucl,Z_CGM,mu);
+    const EmpiricalMetallicityModelParameters chemistry{
+        {power_law_disk_gas,&p},{power_law_disk_velocity,&p},
+        {power_law_disk_landing,&p},{power_law_disk_star,&p},Z_land,yield};
+    const auto solution=integrate_rk4(empirical_metallicity_rhs,&chemistry,p.R_out,{Z_out},
+                                    h0,atol,rtol,p.R_in,h0);
+    const auto radii=radial_grid(p.R_in,p.R_out,static_cast<std::size_t>(count));
+    std::filesystem::create_directories(output);
+    std::ofstream stream(output/"profiles.csv");
+    stream.exceptions(std::ios::failbit | std::ios::badbit);
+    stream << std::setprecision(17)
+        << "model,source,R_kpc,Sigmadot_land_Msun_Gyr_kpc2,Sigmadot_star_Msun_Gyr_kpc2,"
+        << "Sigma_g_Msun_kpc2,v_R_kpc_yr,v_R_kms,Mdot_acc_Msun_yr,cumulative_landing_Msun_yr,"
+        << "v_c_kms,j_disk_kpc_kms,j_CGM_kpc_kms,j_land_kpc_kms,Z_land,Z,dZ_dR_per_kpc\n";
+    for (double R: radii) {
+        const auto disk=power_law_disk_profile(R,p);
+        const double Z=evaluate(solution,R)[0];
+        if (!std::isfinite(Z) || Z<0.0 || Z>1.0)
+            throw std::runtime_error("Mixed disk metallicity must be finite and between zero and one");
+        const double gradient=empirical_metallicity_rhs(R,{Z},&chemistry)[0];
+        const double incident_j=j_land_mixing(R,p.R_nucl,mu,beta,vc,vc);
+        stream << "mixed-power-law,analytic_flat," << R << ',' << disk.landing << ',' << disk.star << ','
+            << disk.gas << ',' << disk.radial_velocity << ',' << disk.radial_velocity*kpc_per_year_to_km_per_second
+            << ',' << disk.accretion << ',' << disk.cumulative_landing << ',' << vc << ',' << j_disk(R,vc)
+            << ',' << j_cgm(R,beta,vc) << ',' << incident_j << ',' << Z_land << ',' << Z << ',' << gradient << '\n';
+    }
+    copy_if_present(input/"parameters.csv",output/"parameters.csv");
+    const auto inner=power_law_disk_profile(p.R_in,p),outer=power_law_disk_profile(p.R_out,p);
+    std::ofstream summary(output/"summary.csv");
+    summary.exceptions(std::ios::failbit | std::ios::badbit);
+    summary << std::setprecision(17) << "quantity,value\nclosure,j_mix\ngas_profile,derived_from_net_KS\n"
+        << "Mdot_land_Msun_yr," << p.Mdot_land << "\nMdot_acc_inner_Msun_yr," << inner.accretion
+        << "\nMdot_acc_outer_Msun_yr," << outer.accretion << "\nZ_land," << Z_land << '\n';
+    std::ofstream method(output/"metallicity_solver.csv");
+    method.exceptions(std::ios::failbit | std::ios::badbit);
+    method << "method,boundary\nRK4_mixed_power_law,Z_outer_boundary\n";
+    std::cout << "Wrote mixed power-law profiles to " << output << '\n';
+}
+
 }
 
 int main(int argc,char** argv){
     try {
-        std::string snapshot_mode=argc>1 ? argv[1] : "";
+        const auto cgm_config=cgm_config_argument(argc,argv);
+        if (argc<4) throw std::invalid_argument("Supply a model command, input directory and output directory");
+        std::string snapshot_mode=argv[1];
         // Accept earlier commands, but write only the current names to outputs.
         if (snapshot_mode=="forward-time") snapshot_mode="disk-evolution";
         if (snapshot_mode=="inverse-time") snapshot_mode="reconstruction";
-        if (argc>=4 && (snapshot_mode=="disk-evolution" || snapshot_mode=="reconstruction")) {
+        if (snapshot_mode=="disk-evolution" || snapshot_mode=="reconstruction") {
             DoubleVec times;
             for (int i=4; i<argc; ++i) {
                 std::size_t used=0;
@@ -513,25 +701,44 @@ int main(int argc,char** argv){
             write_evolving_snapshots(snapshot_mode,argv[2],argv[3],times);
             return 0;
         }
-        if (argc!=4) {
-            std::cerr << "Usage: galactic-nuclear-fountain-model <forward|inverse> <input-directory> <output-directory>\n"
-                      << "   or: galactic-nuclear-fountain-model <disk-evolution|reconstruction> <kernel-run-directory> <output-directory> [t_Myr ...]\n"
-                      << "disk-evolution exports the saved disk evolution; reconstruction recovers the required flow and mixture from it.\n"
-                      << "Both use t_<time>_Myr output directories; the latest saved time is the default.\n";
-            return 2;
+        if (snapshot_mode=="power-law") {
+            write_power_law_profiles(argv[2],argv[3]);
+            return 0;
+        }
+        if (snapshot_mode=="mixed-power-law") {
+            if (argc!=4 || !cgm_config.empty())
+                throw std::invalid_argument("mixed-power-law uses its explicit constant-beta parameters only");
+            write_mixed_power_law_profiles(argv[2],argv[3]);
+            return 0;
+        }
+        if (snapshot_mode=="prescribed-gas") {
+            if (argc!=4 || !cgm_config.empty())
+                throw std::invalid_argument("prescribed-gas takes its own explicit gas/landing/rotation parameters");
+            write_prescribed_gas_model(argv[2],argv[3]);
+            return 0;
         }
 
         const std::string model=argv[1];
         const std::filesystem::path input_directory=argv[2];
         const std::filesystem::path output_directory=argv[3];
         const auto parameters=read_parameters(input_directory/"parameters.csv");
+        const auto cgm_solution=load_cgm(parameters,cgm_config);
+        const RadialProfile cgm_j_profile=cgm_solution ? RadialProfile{cgm_j_kpc_kms,&*cgm_solution} : RadialProfile{};
+        const std::string metallicity_mode=parameter_string(parameters,"metallicity_mode","predicted");
+        const bool observed_chemistry=metallicity_mode=="observed";
+        LinearProfile observed_metallicity,observed_metallicity_derivative;
+        if (observed_chemistry)
+            load_observed_metallicity(input_directory/"metallicity_profiles.csv",observed_metallicity,observed_metallicity_derivative);
         const std::string profile_type=parameter_string(parameters,"profile_type","tabulated");
         const std::string galaxy=parameter_string(parameters,"galaxy",profile_type=="analytic" ? "analytic" : "unknown");
         const double R_nucl=parameter_double(parameters,"R_nucl_kpc");
         const double R_in=parameter_double(parameters,"R_in_kpc");
         const double R_out=parameter_double(parameters,"R_out_kpc");
+        const double lambda=parameter_double(parameters,"lambda",2.0);
+        const std::string landing_kind=parameter_string(parameters,"landing_profile","power_law");
+        const bool analytic_power_law=profile_type=="analytic" && landing_kind=="power_law";
         const double mu=parameter_double(parameters,"mu",1.0);
-        const double beta=parameter_double(parameters,"beta",0.75);
+        const double beta=cgm_solution ? std::numeric_limits<double>::quiet_NaN() : parameter_double(parameters,"beta",0.75);
         const double eta=parameter_double(parameters,"eta");
         const double Mdot_nuc=parameter_double(parameters,"Mdot_nuc_Msun_yr");
         const double Mdot_land=eta*(1.0+mu)*Mdot_nuc;
@@ -550,12 +757,9 @@ int main(int argc,char** argv){
             input_directory/"rotation_curves.csv",
             input_directory/"rotation_profiles.csv"
         );
-        validate_rotation_support(rotations,R_in,R_out);
         const auto launch_velocity=[&](const RotationInput& rotation){
             const double configured=parameter_double(parameters,"v_c_nucl_kms",std::numeric_limits<double>::quiet_NaN());
             if (std::isfinite(configured) && configured>0.0) return configured;
-            if (rotation.kind=="tabulated" && R_nucl<rotation.tabulated_velocity.radius.front())
-                throw std::runtime_error("R_nucl lies below the measured rotation curve; set v_c_nucl_kms explicitly");
             return rotation_velocity(make_rotation_curve(rotation),R_nucl);
         };
 
@@ -581,15 +785,24 @@ int main(int argc,char** argv){
                 tabulated_gas,
                 tabulated_gas_derivative
             );
-            if (parameter_string(parameters,"stellar_sink","")!="net_locked_mass")
-                throw std::runtime_error("Re-export observational inputs with the stellar return correction and stellar_sink=net_locked_mass");
             load_tabulated_star_profile(input_directory/"profiles.csv",tabulated_star);
             gas={linear_profile_value,&tabulated_gas};
             gas_derivative={linear_profile_value,&tabulated_gas_derivative};
             star={linear_profile_value,&tabulated_star};
         }
 
-        const LandingProfileParameters landing_parameters{Mdot_land,R_in,R_out};
+        LandingProfileParameters landing_parameters{Mdot_land,R_in,R_out,lambda};
+        landing_parameters.kind=landing_kind;
+        if (landing_kind=="smooth_broken_power_law") {
+            auto& shape=landing_parameters.smooth;
+            shape.lambda_in=parameter_double(parameters,"landing_lambda_in",shape.lambda_in);
+            shape.lambda_out=parameter_double(parameters,"landing_lambda_out",shape.lambda_out);
+            shape.R_break=parameter_double(parameters,"landing_R_break_kpc",shape.R_break);
+            shape.alpha=parameter_double(parameters,"landing_alpha",shape.alpha);
+            landing_parameters.fit_R_min=parameter_double(parameters,"landing_fit_R_min_kpc",1.0);
+            landing_parameters.fit_R_max=parameter_double(parameters,"landing_fit_R_max_kpc",15.0);
+            landing_parameters.normalization=smooth_landing_integral(R_in,R_out,shape);
+        }
         const RadialProfile landing_profile{prescribed_landing,&landing_parameters};
         const std::string raw_Mdot_out=parameter_string(parameters,"Mdot_out_Msun_yr","auto");
         double Mdot_out=raw_Mdot_out=="auto" ? std::numeric_limits<double>::quiet_NaN() : std::stod(raw_Mdot_out);
@@ -597,9 +810,9 @@ int main(int argc,char** argv){
         if (model=="inverse" && std::isnan(Mdot_out)) {
             const auto& rotation=primary_rotation(rotations,profile_type);
             const RotationCurve rot_curve=make_rotation_curve(rotation);
-            const ForwardModelParameters forward_parameters{R_nucl,R_out,mu,beta,gas,gas_derivative,star,rot_curve,R_in,launch_velocity(rotation)};
+            const ForwardModelParameters forward_parameters{R_nucl,R_out,mu,beta,gas,gas_derivative,star,rot_curve,R_in,launch_velocity(rotation),cgm_j_profile};
             const ForwardModelSolution forward_solution=solve_forward_model(forward_parameters,Mdot_land,h_0,dynamics_atol,rtol);
-            Mdot_out=-2.0*pi*R_out*profile_value(gas,R_out)*forward_radial_velocity(R_out,forward_parameters,forward_solution);
+            Mdot_out=forward_accretion_rate(R_out,forward_parameters,forward_solution);
         }
 
         std::vector<ModelResult> results;
@@ -608,11 +821,14 @@ int main(int argc,char** argv){
         const double Z_land=z_land_mixing(Z_nucl,Z_CGM,mu);
         double R_Z_boundary=R_out;
         bool metallicity_solved=true;
+        std::string metallicity_method="RK4";
+        std::size_t metallicity_cells=0;
+        double metallicity_balance_error=std::numeric_limits<double>::quiet_NaN();
 
         if (model=="forward") {
             for (const RotationInput& rotation: rotations) {
                 const RotationCurve rot_curve=make_rotation_curve(rotation);
-                const ForwardModelParameters forward_parameters{R_nucl,R_out,mu,beta,gas,gas_derivative,star,rot_curve,R_in,launch_velocity(rotation)};
+                const ForwardModelParameters forward_parameters{R_nucl,R_out,mu,beta,gas,gas_derivative,star,rot_curve,R_in,launch_velocity(rotation),cgm_j_profile};
                 const ForwardModelSolution forward_solution=solve_forward_model(forward_parameters,Mdot_land,h_0,dynamics_atol,rtol);
                 const MetallicityModelParameters metallicity_parameters{&forward_parameters,&forward_solution,Z_nucl,Z_CGM,yield};
                 const RK4Solution metallicity_solution=solve_metallicity(metallicity_parameters,R_out,R_Z_stop,Z_boundary,h_0,metallicity_atol,rtol);
@@ -626,23 +842,23 @@ int main(int argc,char** argv){
                     const double circular_velocity=rotation_velocity(rot_curve,R);
                     const double circular_derivative=rotation_velocity_derivative(rot_curve,R);
                     const double disk_angular_momentum=j_disk(R,circular_velocity);
-                    const double cgm_angular_momentum=j_cgm(R,beta,circular_velocity);
-                    const double landing_angular_momentum=j_land_mixing(R,R_nucl,mu,beta,circular_velocity,launch_velocity(rotation));
+                    const double cgm_angular_momentum=cgm_solution ? profile_value(cgm_j_profile,R) : j_cgm(R,beta,circular_velocity);
+                    const double landing_angular_momentum=j_land_from_reservoirs(nuclear_angular_momentum,cgm_angular_momentum,mu);
                     const bool chemistry_defined=R>=R_Z_stop;
                     const double metallicity=chemistry_defined ? evaluate(metallicity_solution,R)[0] : std::numeric_limits<double>::quiet_NaN();
                     const DoubleVec metallicity_state{metallicity};
                     const double metallicity_derivative=chemistry_defined ? metallicity_rhs(R,metallicity_state,&metallicity_parameters)[0] : std::numeric_limits<double>::quiet_NaN();
                     const double required_landing_metallicity=chemistry_defined ? z_land_required(metallicity,metallicity_derivative,gas_value,radial_velocity,landing,star_value,yield) : std::numeric_limits<double>::quiet_NaN();
-                    result.profiles.push_back({model,rotation.source,R,gas_value,star_value,landing,forward_cumulative_landing(R,forward_solution),radial_velocity,radial_velocity*kpc_per_year_to_km_per_second,R*gas_value*radial_velocity,mdot_acc_from_velocity(R,gas_value,radial_velocity),R/std::abs(radial_velocity)/1e9,gas_value/star_value/1e9,circular_velocity,circular_derivative,disk_angular_momentum,cgm_angular_momentum,landing_angular_momentum,landing_angular_momentum-disk_angular_momentum,landing_angular_momentum/disk_angular_momentum,landing_angular_momentum/nuclear_angular_momentum,mu_from_mixing(landing_angular_momentum,nuclear_angular_momentum,cgm_angular_momentum),metallicity,Z_land+yield*star_value/landing,metallicity_derivative,required_landing_metallicity,mu_from_mixing(required_landing_metallicity,Z_nucl,Z_CGM)});
+                    result.profiles.push_back({model,rotation.source,R,gas_value,star_value,landing,forward_cumulative_landing(R,forward_solution),radial_velocity,radial_velocity*kpc_per_year_to_km_per_second,R*gas_value*radial_velocity,forward_accretion_rate(R,forward_parameters,forward_solution),R/std::abs(radial_velocity)/1e9,gas_value/star_value,circular_velocity,circular_derivative,disk_angular_momentum,cgm_angular_momentum,landing_angular_momentum,landing_angular_momentum-disk_angular_momentum,landing_angular_momentum/disk_angular_momentum,landing_angular_momentum/nuclear_angular_momentum,mu_from_mixing(landing_angular_momentum,nuclear_angular_momentum,cgm_angular_momentum),metallicity,Z_land+yield*star_value/landing,metallicity_derivative,required_landing_metallicity,mu_from_mixing(required_landing_metallicity,Z_nucl,Z_CGM)});
                 }
                 results.push_back(std::move(result));
             }
-        } else if (model=="inverse") {
+        } else {
             RK4Solution inverse_solution;
             InverseModelParameters inverse_parameters{};
             EmpiricalInverseModelParameters empirical_parameters{};
-            if (profile_type=="analytic") {
-                inverse_parameters={analytic_profiles.R_g,analytic_profiles.sigma_g0,analytic_profiles.A,analytic_profiles.N,Mdot_land,R_in,R_out,Mdot_out};
+            if (analytic_power_law) {
+                inverse_parameters={analytic_profiles.R_g,analytic_profiles.sigma_g0,analytic_profiles.A,analytic_profiles.N,Mdot_land,R_in,R_out,Mdot_out,lambda};
                 inverse_solution=solve_inverse_model(inverse_parameters,R_in,h_0,dynamics_atol,rtol);
             } else {
                 empirical_parameters={gas,star,landing_profile,R_out,Mdot_out};
@@ -651,12 +867,13 @@ int main(int argc,char** argv){
             const double R_Z_start=Mdot_out==0.0 ? R_out-std::min(0.1,0.01*radial_span) : R_out;
             R_Z_boundary=R_Z_start;
             RK4Solution metallicity_solution;
+            LinearProfile conservative_metallicity;
             InverseMetallicityModelParameters analytic_metallicity_parameters{};
             EmpiricalInverseVelocityParameters velocity_parameters{&inverse_solution,&empirical_parameters};
             const RadialProfile velocity_profile{empirical_inverse_velocity,&velocity_parameters};
             EmpiricalMetallicityModelParameters empirical_metallicity_parameters{};
             const auto inverse_velocity=[&](double R){
-                return profile_type=="analytic" ?
+                return analytic_power_law ?
                     inverse_radial_velocity(R,inverse_solution,inverse_parameters) :
                     empirical_inverse_radial_velocity(R,inverse_solution,empirical_parameters);
             };
@@ -694,24 +911,47 @@ int main(int argc,char** argv){
                 previous_v=v;
             }
             metallicity_solved=!has_stagnation;
-
-            if (has_stagnation) {
-                std::cerr << "Warning: inverse v_R stagnates inside the "
-                    << "metallicity domain; skipping inverse metallicity";
+            if (has_stagnation && !observed_chemistry) {
+                std::cerr << "Inverse v_R stagnates inside the metallicity domain; "
+                    << "solving conservative steady metal transport";
                 for (const double radius: stagnation_radii) {
                     std::cerr << ' ' << radius << " kpc";
                 }
                 std::cerr << '\n';
+                metallicity_cells=static_cast<std::size_t>(parameter_double(parameters,"metallicity_cells",16384.0));
+                const ConservativeMetallicityParameters chemistry{landing_profile,star,Z_land,yield,
+                    -Mdot_out,parameter_double(parameters,"Z_inner_boundary",std::numeric_limits<double>::quiet_NaN()),Z_boundary};
+                try {
+                    const auto solution=solve_conservative_metallicity(chemistry,R_in,R_out,metallicity_cells);
+                    conservative_metallicity=solution.metallicity;
+                    metallicity_balance_error=solution.max_cell_balance_error;
+                    metallicity_solved=true;
+                    metallicity_method="conservative_upwind";
+                    R_Z_boundary=R_out;
+                } catch (const std::exception& error) {
+                    metallicity_method="unavailable";
+                    std::cerr << "Skipping inverse metallicity: " << error.what() << '\n';
+                }
             }
 
-            if (!has_stagnation) {
-                if (profile_type=="analytic") {
+            if (!has_stagnation && !observed_chemistry) {
+                if (analytic_power_law) {
                     analytic_metallicity_parameters={&inverse_parameters,&inverse_solution,Z_land,yield};
                     metallicity_solution=solve_inverse_metallicity(analytic_metallicity_parameters,R_Z_start,R_Z_stop,Z_boundary,h_0,metallicity_atol,rtol);
                 } else {
                     empirical_metallicity_parameters={gas,velocity_profile,landing_profile,star,Z_land,yield};
                     metallicity_solution=solve_empirical_metallicity(empirical_metallicity_parameters,R_Z_start,R_Z_stop,Z_boundary,h_0,metallicity_atol,rtol);
                 }
+            }
+            if (observed_chemistry) {
+                // Infer incident composition from the supplied disk abundance,
+                // independent of the trial fountain composition. No chemical ODE
+                // or artificial abundance boundary is applied to these inputs.
+                if (observed_metallicity.radius.back()<R_in || observed_metallicity.radius.front()>R_out)
+                    throw std::runtime_error("Observed metallicity has no overlap with the modeled disk");
+                metallicity_solved=true;
+                metallicity_method="observed_profile";
+                R_Z_boundary=std::numeric_limits<double>::quiet_NaN();
             }
             for (const RotationInput& rotation: rotations) {
                 const RotationCurve rot_curve=make_rotation_curve(rotation);
@@ -725,26 +965,57 @@ int main(int argc,char** argv){
                     const double circular_velocity=rotation_velocity(rot_curve,R);
                     const double circular_derivative=rotation_velocity_derivative(rot_curve,R);
                     const double disk_angular_momentum=j_disk(R,circular_velocity);
-                    const double cgm_angular_momentum=j_cgm(R,beta,circular_velocity);
+                    const double cgm_angular_momentum=cgm_solution ? profile_value(cgm_j_profile,R) : j_cgm(R,beta,circular_velocity);
                     const double landing_angular_momentum=j_land_required(R,gas_value,radial_velocity,landing,circular_velocity,circular_derivative);
-                    const bool chemistry_defined=!has_stagnation && R>=R_Z_stop && R<=R_Z_start;
-                    const double metallicity=chemistry_defined ? evaluate(metallicity_solution,R)[0] : std::numeric_limits<double>::quiet_NaN();
+                    const bool conservative=metallicity_method=="conservative_upwind";
+                    const bool chemistry_defined=metallicity_solved && (observed_chemistry ?
+                        R>=observed_metallicity.radius.front() && R<=observed_metallicity.radius.back() :
+                        conservative || (R>=R_Z_stop && R<=R_Z_start));
+                    const double metallicity=!chemistry_defined ? std::numeric_limits<double>::quiet_NaN() :
+                        observed_chemistry ? linear_profile_value(R,&observed_metallicity) :
+                        conservative ? linear_profile_value(R,&conservative_metallicity) : evaluate(metallicity_solution,R)[0];
                     const DoubleVec metallicity_state{metallicity};
-                    const double metallicity_derivative=!chemistry_defined ? std::numeric_limits<double>::quiet_NaN() : profile_type=="analytic" ? inverse_metallicity_rhs(R,metallicity_state,&analytic_metallicity_parameters)[0] : empirical_metallicity_rhs(R,metallicity_state,&empirical_metallicity_parameters)[0];
-                    const double required_landing_metallicity=chemistry_defined ? z_land_required(metallicity,metallicity_derivative,gas_value,radial_velocity,landing,star_value,yield) : std::numeric_limits<double>::quiet_NaN();
-                    const double cumulative_landing=Mdot_land*std::log(R/R_in)/std::log(R_out/R_in);
-                    result.profiles.push_back({model,rotation.source,R,gas_value,star_value,landing,cumulative_landing,radial_velocity,radial_velocity*kpc_per_year_to_km_per_second,R*gas_value*radial_velocity,mdot_acc_from_velocity(R,gas_value,radial_velocity),R/std::abs(radial_velocity)/1e9,gas_value/star_value/1e9,circular_velocity,circular_derivative,disk_angular_momentum,cgm_angular_momentum,landing_angular_momentum,landing_angular_momentum-disk_angular_momentum,landing_angular_momentum/disk_angular_momentum,landing_angular_momentum/nuclear_angular_momentum,mu_from_mixing(landing_angular_momentum,nuclear_angular_momentum,cgm_angular_momentum),metallicity,Z_land+yield*star_value/landing,metallicity_derivative,required_landing_metallicity,mu_from_mixing(required_landing_metallicity,Z_nucl,Z_CGM)});
+                    double metallicity_derivative=std::numeric_limits<double>::quiet_NaN();
+                    if (chemistry_defined && observed_chemistry) {
+                        metallicity_derivative=linear_profile_value(R,&observed_metallicity_derivative);
+                    } else if (chemistry_defined && conservative) {
+                        // Report the steady equation's derivative away from
+                        // zero flow. A finite Z need not have a finite slope
+                        // at the stagnation point itself.
+                        if (radial_velocity!=0.0)
+                            metallicity_derivative=metallicity_gradient(metallicity,gas_value,radial_velocity,landing,star_value,Z_land,yield);
+                    } else if (chemistry_defined) {
+                        metallicity_derivative=analytic_power_law ? inverse_metallicity_rhs(R,metallicity_state,&analytic_metallicity_parameters)[0] : empirical_metallicity_rhs(R,metallicity_state,&empirical_metallicity_parameters)[0];
+                    }
+                    const double required_landing_metallicity=!chemistry_defined ? std::numeric_limits<double>::quiet_NaN() :
+                        conservative && radial_velocity==0.0 ? metallicity-yield*star_value/landing :
+                        z_land_required(metallicity,metallicity_derivative,gas_value,radial_velocity,landing,star_value,yield);
+                    const double cumulative_landing=prescribed_cumulative_landing(R,landing_parameters);
+                    result.profiles.push_back({model,rotation.source,R,gas_value,star_value,landing,cumulative_landing,radial_velocity,radial_velocity*kpc_per_year_to_km_per_second,R*gas_value*radial_velocity,mdot_acc_from_velocity(R,gas_value,radial_velocity),R/std::abs(radial_velocity)/1e9,gas_value/star_value,circular_velocity,circular_derivative,disk_angular_momentum,cgm_angular_momentum,landing_angular_momentum,landing_angular_momentum-disk_angular_momentum,landing_angular_momentum/disk_angular_momentum,landing_angular_momentum/nuclear_angular_momentum,mu_from_mixing(landing_angular_momentum,nuclear_angular_momentum,cgm_angular_momentum),metallicity,Z_land+yield*star_value/landing,metallicity_derivative,required_landing_metallicity,mu_from_mixing(required_landing_metallicity,Z_nucl,Z_CGM)});
                 }
                 results.push_back(std::move(result));
             }
-        } else {
-            throw std::runtime_error("Model must be forward or inverse");
         }
 
         std::filesystem::create_directories(output_directory);
+        if (model=="inverse") {
+            write_landing_profile(output_directory/"landing_profile.csv",landing_parameters);
+            write_landing_prescription(output_directory/"landing_prescription.csv",landing_parameters,R_nucl,results.front().profiles);
+        }
         write_profiles(output_directory/"profiles.csv",results);
         write_summary(output_directory/"summary.csv",model,profile_type,galaxy,results,R_nucl,R_out,Mdot_land,Mdot_out,mu,beta,Z_nucl,Z_CGM,yield,Z_boundary,R_Z_boundary,metallicity_solved,std::numeric_limits<double>::quiet_NaN(),R_in);
+        std::ofstream chemistry_info(output_directory/"metallicity_solver.csv");
+        chemistry_info.exceptions(std::ios::failbit | std::ios::badbit);
+        chemistry_info << std::setprecision(17) << "method,cells,max_cell_metal_balance_error_Msun_yr\n"
+                       << metallicity_method << ',' << metallicity_cells << ',' << metallicity_balance_error << '\n';
         copy_if_present(input_directory/"parameters.csv",output_directory/"parameters.csv");
+        if (cgm_solution) {
+            write_cgm_profile(output_directory,*cgm_solution);
+        }
+        if (cgm_solution || !cgm_config.empty())
+            write_cgm_model_parameters(output_directory/"parameters.csv",parameters,cgm_solution ? &*cgm_solution : nullptr);
+        copy_if_present(input_directory/"metallicity_profiles.csv",output_directory/"metallicity_profiles.csv");
+        copy_if_present(input_directory/"metallicity_fit.csv",output_directory/"metallicity_fit.csv");
         copy_if_present(input_directory/"metadata.csv",output_directory/"metadata.csv");
         copy_if_present(input_directory/"rotation_curves.csv",output_directory/"rotation_curves.csv");
         copy_if_present(input_directory/"rotation_profiles.csv",output_directory/"rotation_profiles.csv");

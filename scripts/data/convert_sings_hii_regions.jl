@@ -57,30 +57,25 @@ const EXPECTED_COUNTS = Dict(
     "NGC7793" => 12,
 )
 
-
 function fixed_field(line, first_byte, last_byte)
     padded = ncodeunits(line) < last_byte ? rpad(line, last_byte) : line
     return strip(padded[first_byte:last_byte])
 end
-
 
 function parse_float_field(line, first_byte, last_byte)
     value = fixed_field(line, first_byte, last_byte)
     return isempty(value) ? missing : something(tryparse(Float64, value), missing)
 end
 
-
 function parse_int_field(line, first_byte, last_byte)
     value = fixed_field(line, first_byte, last_byte)
     return isempty(value) ? missing : something(tryparse(Int, value), missing)
 end
 
-
 function parse_string_field(line, first_byte, last_byte)
     value = fixed_field(line, first_byte, last_byte)
     return isempty(value) ? missing : value
 end
-
 
 function ensure_raw_catalog()
     mkpath(RAW_DIR)
@@ -92,7 +87,6 @@ function ensure_raw_catalog()
         end
     end
 end
-
 
 function read_hii_regions(path)
     rows = NamedTuple[]
@@ -122,12 +116,8 @@ function read_hii_regions(path)
         DE_minutes = parse_int_field(line, 112, 113)
         DE_seconds = parse_int_field(line, 115, 116)
 
-        center_RAJ2000_deg = 15 * (
-            RA_hours + RA_minutes / 60 + RA_seconds / 3600
-        )
-        center_DEJ2000_deg = (DE_sign == "-" ? -1 : 1) * (
-            DE_degrees + DE_minutes / 60 + DE_seconds / 3600
-        )
+        center_RAJ2000_deg = 15 * (RA_hours + RA_minutes / 60 + RA_seconds / 3600)
+        center_DEJ2000_deg = (DE_sign == "-" ? -1 : 1) * (DE_degrees + DE_minutes / 60 + DE_seconds / 3600)
 
         push!(rows, (
             source_seq = source_seq,
@@ -144,13 +134,11 @@ function read_hii_regions(path)
             OH12_KK04_dex = OH12_KK04,
             e_OH12_KK04_dex = e_OH12_KK04,
             flag_OH12_KK04 = flag_KK04,
-            usable_OH12_KK04 = !ismissing(OH12_KK04) &&
-                !ismissing(e_OH12_KK04) && ismissing(flag_KK04),
+            usable_OH12_KK04 = !ismissing(OH12_KK04) && !ismissing(e_OH12_KK04) && ismissing(flag_KK04),
             OH12_PT05_dex = OH12_PT05,
             e_OH12_PT05_dex = e_OH12_PT05,
             flag_OH12_PT05 = flag_PT05,
-            usable_OH12_PT05 = !ismissing(OH12_PT05) &&
-                !ismissing(e_OH12_PT05) && ismissing(flag_PT05),
+            usable_OH12_PT05 = !ismissing(OH12_PT05) && !ismissing(e_OH12_PT05) && ismissing(flag_PT05),
             reference_id = parse_int_field(line, 94, 95),
             center_RAJ2000_deg = center_RAJ2000_deg,
             center_DEJ2000_deg = center_DEJ2000_deg,
@@ -161,7 +149,6 @@ function read_hii_regions(path)
 
     return DataFrame(rows)
 end
-
 
 function read_sings_galaxies(path)
     rows = Dict{String, NamedTuple}()
@@ -182,7 +169,6 @@ function read_sings_galaxies(path)
     return rows
 end
 
-
 function read_references(path)
     rows = Dict{Int, NamedTuple}()
 
@@ -200,17 +186,13 @@ function read_references(path)
     return rows
 end
 
-
 function physical_radius_kpc(angle_arcmin, distance_Mpc)
     any(ismissing, (angle_arcmin, distance_Mpc)) && return missing
     return 1_000 * distance_Mpc * tan(deg2rad(angle_arcmin / 60))
 end
 
-
 function add_metadata(hii, sings_galaxies, references, local_galaxies)
-    local_by_galaxy = Dict(
-        string(row.galaxy) => NamedTuple(row) for row in eachrow(local_galaxies)
-    )
+    local_by_galaxy = Dict(string(row.galaxy) => NamedTuple(row) for row in eachrow(local_galaxies))
     rows = NamedTuple[]
 
     for row in eachrow(hii)
@@ -220,10 +202,7 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
         reference = references[row.reference_id]
         adopted = local_by_galaxy[row.galaxy]
 
-        R25_sings_kpc = physical_radius_kpc(
-            survey.R25_sings_arcmin,
-            survey.D_sings_Mpc,
-        )
+        R25_sings_kpc = physical_radius_kpc(survey.R25_sings_arcmin, survey.D_sings_Mpc)
         R_sings_kpc = ismissing(row.R_R25) ? missing : row.R_R25 * R25_sings_kpc
 
         R_adopted_kpc = ismissing(row.R_R25) ?
@@ -269,14 +248,9 @@ function add_metadata(hii, sings_galaxies, references, local_galaxies)
         ))
     end
 
-    sort!(rows; by=row -> (
-        row.galaxy,
-        coalesce(row.R_R25, Inf),
-        row.source_seq,
-    ))
+    sort!(rows; by=row -> (row.galaxy, coalesce(row.R_R25, Inf), row.source_seq))
     return DataFrame(rows)
 end
-
 
 function make_coverage(sample)
     rows = NamedTuple[]
@@ -302,13 +276,11 @@ function make_coverage(sample)
     return DataFrame(rows)
 end
 
-
 function validate_catalog(raw, sample, coverage)
     nrow(raw) == 561 || error("Expected 561 rows in table10.dat; found $(nrow(raw))")
     allunique(raw.source_seq) || error("SINGS source sequence numbers are not unique")
     expected_sample_rows = sum(values(EXPECTED_COUNTS))
-    nrow(sample) == expected_sample_rows ||
-        error("Expected $expected_sample_rows matched rows; found $(nrow(sample))")
+    nrow(sample) == expected_sample_rows || error("Expected $expected_sample_rows matched rows; found $(nrow(sample))")
 
     counts = Dict(row.galaxy => row.n_rows for row in eachrow(coverage))
     counts == EXPECTED_COUNTS || error("Unexpected matched-galaxy row counts: $counts")
@@ -318,11 +290,9 @@ function validate_catalog(raw, sample, coverage)
 
     for column in (:OH12_KK04_dex, :OH12_PT05_dex)
         values = collect(skipmissing(sample[!, column]))
-        all(value -> 7 <= value <= 10, values) ||
-            error("Implausible oxygen abundance in $column")
+        all(value -> 7 <= value <= 10, values) || error("Implausible oxygen abundance in $column")
     end
 end
-
 
 function main()
     ensure_raw_catalog()
@@ -347,7 +317,6 @@ function main()
     println("Wrote: $(relpath(OUTPUT_FILE, ROOT))")
     println("Wrote: $(relpath(COVERAGE_FILE, ROOT))")
 end
-
 
 if abspath(PROGRAM_FILE) == @__FILE__
     main()

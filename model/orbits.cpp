@@ -1,5 +1,6 @@
 #include "orbits.h"
 #include "potential.h"
+#include "cgm_amd.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,13 +40,15 @@ DoubleVec orbit(double /*t*/, // fixed potential and CGM
     double dphi_dR = dphi_mn_dR(R, z, p->M_d, p->a_d, p->b_d) + dphi_h_dR(R, z, p->M_b, p->a_b) + dphi_nfw_dR(R, z, p->rho_s, p->r_s);
     double dphi_dz = dphi_mn_dz(R, z, p->M_d, p->a_d, p->b_d) + dphi_h_dz(R, z, p->M_b, p->a_b) + dphi_nfw_dz(R, z, p->rho_s, p->r_s);
     const double v_c = circular_velocity(R, *p);
-    const double u = std::hypot(vR, vz, j_z/R - p->beta*v_c);
-    const double swept_mass_rate = p->rho_CGM * p->sigma * u;
+    const double rho=p->cgm ? cgm_density(*p->cgm,R,z) : p->rho_CGM;
+    const double j_CGM=p->cgm ? (rho>0.0 ? cgm_angular_momentum(*p->cgm,R) : 0.0) : p->beta*R*v_c;
+    const double u = std::hypot(vR, vz, (j_z-j_CGM)/R);
+    const double swept_mass_rate = rho * p->sigma * u;
     const double Gamma = (p->epsilon + 0.5*p->C_D) * swept_mass_rate / mass;
     double dvR_dt = -dphi_dR + j_z*j_z/(R*R*R) - Gamma*vR;
     double dvz_dt = -dphi_dz - Gamma*vz;
 
-    return {vR, vz, dvR_dt, dvz_dt, Gamma*(p->beta*R*v_c-j_z),
+    return {vR, vz, dvR_dt, dvz_dt, Gamma*(j_CGM-j_z),
             p->epsilon*swept_mass_rate};
     }
 
@@ -157,7 +160,8 @@ OrbitResult integrate_orbit_impl(const DoubleVec& launch_conditions,
                 const double landing_time = left + (right - left) / 2.0;
                 const DoubleVec landing = evaluate(bracket, landing_time);
                 // Preserve the exact constant-mass limit through Hermite interpolation.
-                const double mass_ratio=p.epsilon*p.rho_CGM*p.sigma==0.0 ? 1.0 : landing[5]/launch_conditions[5];
+                const bool no_condensation=p.epsilon==0.0 || p.sigma==0.0 || (!p.cgm && p.rho_CGM==0.0);
+                const double mass_ratio=no_condensation ? 1.0 : landing[5]/launch_conditions[5];
                 if (!finite(landing) || landing[0] <= 0.0 || landing[3] >= 0.0) {
                     append_terminal_sample(samples, t, y);
                     return {OrbitStatus::IntegrationFailed};

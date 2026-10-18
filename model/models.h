@@ -16,7 +16,7 @@ struct MassContinuityParameters {
     double Z_nucl = 0.02; // nuclear and CGM metal mass fractions, as in z_land_mixing()
     double Z_CGM = 0.003;
     double yield = 0.015; // newly produced metals per unit star-formation sink mass
-    DoubleVec sigmadot_star; // saved instantaneous net KS sink for reconstruction [Msun/yr/kpc^2]
+    DoubleVec sigmadot_star; // saved instantaneous net KS sink for reconstruction [Msun/Gyr/kpc^2]
     // Signed fluxes through the two domain boundaries, positive toward increasing R.
     // Zero gives closed boundaries; negative inner flux removes gas into the nucleus.
     double inner_mass_flux = 0.0; // [Msun/yr]
@@ -42,7 +42,7 @@ DoubleVec advance_mass_continuity(double t_Myr, double dt_Myr, const DoubleVec& 
                                  const MassContinuityParameters& parameters);
 // Net KS sinks evaluated from the gas densities at the current RK4 stage.
 DoubleVec mass_continuity_star(const DoubleVec& sigma_g, const MassContinuityParameters& parameters);
-// Wind/mass sources [Msun/yr/kpc^2], angular source times kpc^2/Myr.
+// Wind/mass sources [Msun/Gyr/kpc^2], angular source times kpc^2/Myr.
 void mass_continuity_landing_sources(double t_Myr, const MassContinuityParameters& parameters,
                                     DoubleVec& wind, DoubleVec& mass, DoubleVec& angular);
 // INTERNAL edge velocities [kpc/yr], positive outward. Interpolate the total landing
@@ -76,6 +76,7 @@ struct InverseModelParameters {
     double R_in;
     double R_out;
     double Mdot_out;
+    double lambda=2.0;
 };
 
 struct EmpiricalInverseModelParameters {
@@ -86,6 +87,7 @@ struct EmpiricalInverseModelParameters {
     double Mdot_out;
 };
 
+// Both inverse ODEs integrate Mdot_acc directly from the supplied outer flux.
 DoubleVec inverse_model_rhs(double R,const DoubleVec& state,const void* parameters);
 DoubleVec empirical_inverse_model_rhs(double R,const DoubleVec& state,const void* parameters);
 RK4Solution solve_inverse_model(const InverseModelParameters& parameters,double R_stop,double h_0,double atol,double rtol);
@@ -110,9 +112,12 @@ struct ForwardModelParameters {
     RotationCurve rot_curve;
     double R_in; // modeled disk edge, independent of the launch radius
     double v_c_nucl; // explicit circular speed at the launch radius, in rotation-curve units
+    RadialProfile cgm_angular_momentum{}; // optional local j_CGM, in rotation-curve units
 };
 
 struct ForwardModelSolution {
+    // State: {Mdot_acc, cumulative_landing}; the regular mu=0 branch uses
+    // {angular_momentum_integral, cumulative_landing} to avoid its singular edge.
     RK4Solution solution;
     double Mdot_land;
     double initial_radial_velocity;
@@ -120,7 +125,7 @@ struct ForwardModelSolution {
     bool nonmixing;
 };
 
-// Radial-velocity ODE for the mixing forward model.
+// Accretion-rate ODE, in Msun/yr, and cumulative landing for the mixing model.
 DoubleVec forward_mixing_rhs(double R,const DoubleVec& state,const void* parameters);
 DoubleVec forward_nonmixing_rhs(double R,const DoubleVec& state,const void* parameters);
 double sigmadot_land_mixing_from_velocity(double R,double radial_velocity,const ForwardModelParameters& parameters);
@@ -132,6 +137,7 @@ ForwardModelSolution solve_forward_mixing(const ForwardModelParameters& paramete
 ForwardModelSolution solve_forward_nonmixing(const ForwardModelParameters& parameters,double h_0,double atol,double rtol);
 // Solve the forward model for arbitrary gas and rotation-curve profiles.
 ForwardModelSolution solve_forward_model(const ForwardModelParameters& parameters,double target_mdot_land,double h_0,double atol,double rtol);
+double forward_accretion_rate(double R,const ForwardModelParameters& parameters,const ForwardModelSolution& solution);
 double forward_radial_velocity(double R,const ForwardModelParameters& parameters,const ForwardModelSolution& solution);
 double forward_landing_rate(double R,const ForwardModelParameters& parameters,const ForwardModelSolution& solution);
 double forward_cumulative_landing(double R,const ForwardModelSolution& solution);
@@ -170,6 +176,26 @@ struct EmpiricalMetallicityModelParameters {
     double Z_land;
     double yield;
 };
+
+struct ConservativeMetallicityParameters {
+    RadialProfile sigmadot_land;
+    RadialProfile sigmadot_star;
+    double Z_land;
+    double yield;
+    double outer_mass_flux; // 2*pi*R*Sigma_g*v_R; positive outward
+    double Z_inner_boundary; // may be NaN for a closed or outflow boundary
+    double Z_outer_boundary;
+};
+
+struct ConservativeMetallicitySolution {
+    LinearProfile metallicity;
+    double inner_mass_flux;
+    double max_cell_balance_error;
+};
+
+// Steady annular metal conservation with upwind transport. Includes v_R=0.
+ConservativeMetallicitySolution solve_conservative_metallicity(
+    const ConservativeMetallicityParameters& parameters,double R_in,double R_out,std::size_t cells);
 
 DoubleVec metallicity_rhs(double R,const DoubleVec& state,const void* parameters);
 DoubleVec inverse_metallicity_rhs(double R,const DoubleVec& state,const void* parameters);

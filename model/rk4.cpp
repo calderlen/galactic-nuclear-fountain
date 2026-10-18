@@ -74,14 +74,17 @@ RK4Step rk4_step_doubling(FunctionDerivative f, const void* parameters, const do
 }
 
 
-RK4Solution integrate_rk4(FunctionDerivative f, const void* parameters, const double x_0, const DoubleVec& y_0, const double h_0, const double atol, const double rtol, const double x_stop){
+RK4Solution integrate_rk4(FunctionDerivative f, const void* parameters, const double x_0, const DoubleVec& y_0, const double h_0, const double atol, const double rtol, const double x_stop, const double max_step){
+
+if (std::isnan(max_step) || max_step<=0.0)
+    throw std::invalid_argument("Maximum RK4 step must be positive");
 
 double x=x_0;
 DoubleVec y=y_0;
 
 const double direction = x_stop>x_0 ? 1.0 : -1.0;
 
-double h=direction*std::abs(h_0);
+double h=direction*std::min(std::abs(h_0),max_step);
 
 const int max_steps = 100000;
 
@@ -141,7 +144,7 @@ for (int attempts=0; attempts<max_steps && direction*(x_stop-x)>0.0; ++attempts)
         factor=std::clamp(factor, 0.2, 5.0);
     }
 
-    h*=factor;
+    h=direction*std::min(std::abs(h)*factor,max_step);
 
     if (!std::isfinite(h) || (direction*(x_stop-x)>0.0 && x+h==x)) {
         throw std::runtime_error("The RK4 step size underflowed");

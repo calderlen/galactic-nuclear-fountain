@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Plot selected parcel trajectories in cylindrical R-z coordinates."""
 
+from axis_labels import quantity_unit_label
+
 import argparse
 import csv
 import math
@@ -10,6 +12,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from color_palette import color_cycle
 from matplotlib.colors import Normalize
 import numpy as np
 
@@ -52,8 +55,7 @@ def read_trajectories(path):
     return sorted(trajectories)
 
 
-def plot_trajectories(trajectories, output_path, r_max=None, z_max=None,
-                      equal_aspect=False):
+def plot_trajectories(trajectories, output_path, r_max=None, z_max=None, equal_aspect=False):
     all_R = np.concatenate([values["R_kpc"] for _, _, values in trajectories])
     all_z = np.concatenate([values["z_kpc"] for _, _, values in trajectories])
     if r_max is None:
@@ -63,7 +65,7 @@ def plot_trajectories(trajectories, output_path, r_max=None, z_max=None,
 
     # AASTeX two-column layouts provide about 3.5 inches for one column.
     smplotlib.set_style(usetex=False, fontsize=8, figsize=(3.5, 3.65), dpi=144)
-    plt.rcParams.update({
+    plt.rcParams.update({"axes.prop_cycle": color_cycle(),
         "axes.grid": False, "axes.labelsize": 8, "axes.linewidth": 0.8,
         "xtick.direction": "in", "ytick.direction": "in",
         "xtick.labelsize": 7, "ytick.labelsize": 7,
@@ -89,11 +91,9 @@ def plot_trajectories(trajectories, output_path, r_max=None, z_max=None,
                         linewidth=1.25, zorder=2)
         theta = math.degrees(values["theta_rad"][0])
         psi = math.degrees(values["psi_rad"][0])
-        labels.append((line, f"$\\theta={theta:.0f}^\\circ,\\ "
-                             f"\\psi={psi:.0f}^\\circ$"))
+        labels.append((line, f"$\\theta={theta:.0f}^\\circ,\\ " f"\\psi={psi:.0f}^\\circ$"))
 
-    ax.set(xlabel=r"$R$ [kpc]", ylabel=r"$z$ [kpc]",
-           xlim=(0, r_max), ylim=(0, z_max))
+    ax.set(xlabel=r"$R$ [kpc]", ylabel=quantity_unit_label(r"$z$ [kpc]"), xlim=(0, r_max), ylim=(0, z_max))
     if equal_aspect:
         ax.set_aspect("equal", adjustable="box")
     else:
@@ -102,7 +102,7 @@ def plot_trajectories(trajectories, output_path, r_max=None, z_max=None,
     colorbar_ax = ax.inset_axes([1.05, 0.0, 0.055, 1.0])
     colorbar = figure.colorbar(
         plt.cm.ScalarMappable(norm=normalization, cmap=color_map),
-        cax=colorbar_ax, label=r"$v_k$ [km s$^{-1}$]",
+        cax=colorbar_ax, label=quantity_unit_label(r"$v_k$ [km s$^{-1}$]"),
     )
     colorbar.ax.tick_params(labelsize=7)
     if len(labels) <= 12:
@@ -116,8 +116,9 @@ def plot_trajectories(trajectories, output_path, r_max=None, z_max=None,
             text.set_math_fontfamily("cm")
     else:
         print("More than 12 trajectories: omitted per-particle launch-angle legend")
+    output_path = output_path.with_suffix(".pdf")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=300)
+    figure.savefig(output_path, format="pdf")
     plt.close(figure)
     print(f"Wrote {output_path}")
 
@@ -132,8 +133,7 @@ def main():
                         help="use the same physical scale for one kpc in R and z")
     args = parser.parse_args()
     output = args.output or args.trajectories.with_name(args.trajectories.stem + "_R_z.pdf")
-    plot_trajectories(read_trajectories(args.trajectories), output,
-                      args.r_max, args.z_max, args.equal_aspect)
+    plot_trajectories(read_trajectories(args.trajectories), output, args.r_max, args.z_max, args.equal_aspect)
 
 
 if __name__ == "__main__":

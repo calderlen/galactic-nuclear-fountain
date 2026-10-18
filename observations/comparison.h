@@ -37,6 +37,7 @@ struct Observation {
     double R_kpc;
     double OH12;
     double e_OH12;
+    std::vector<int> source_sequences{};
 };
 
 struct ModelCurve {
@@ -108,6 +109,7 @@ struct FitStatistics {
 
 std::string calibration_name(Calibration calibration);
 double oxygen_abundance_from_metallicity(double metallicity);
+double metallicity_from_oxygen_abundance(double OH12);
 std::vector<Observation> select_observations(
     const std::vector<CatalogRow>& catalog,
     const std::string& galaxy,

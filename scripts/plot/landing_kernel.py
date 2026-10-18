@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Plot kernel CSVs as combined pages and individual single-column PDFs."""
 
+from axis_labels import quantity_unit_label
+from core_calculations import run_calculation
+
 import argparse
 import csv
 import gzip
@@ -10,6 +13,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from color_palette import color_cycle
 from matplotlib.colors import LogNorm, SymLogNorm
 from matplotlib.lines import Line2D
 import numpy as np
@@ -41,7 +45,7 @@ def square_colorbar(mesh, ax, label, **kwargs):
     """Keep the data axes square and the colorbar aligned to their height."""
     ax.set_box_aspect(1)
     colorbar_ax = ax.inset_axes([1.05, 0, 0.05, 1])
-    return ax.figure.colorbar(mesh, cax=colorbar_ax, label=label, **kwargs)
+    return ax.figure.colorbar(mesh, cax=colorbar_ax, label=quantity_unit_label(label), **kwargs)
 
 
 def add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, norm):
@@ -52,16 +56,14 @@ def add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, norm):
         radius_edges, delay_edges, np.ma.masked_equal(density.T, 0.0),
         cmap=color_map, norm=norm, shading="flat", rasterized=True,
     )
-    zoom_ax.set(
-        xlim=(0, 5), ylim=(0, 100), box_aspect=1,
-        xticks=(0, 2.5, 5), yticks=(0, 50, 100),
-    )
+    zoom_ax.set(xlim=(0, 5), ylim=(0, 100), box_aspect=1, xticks=(0, 2.5, 5), yticks=(0, 50, 100))
     zoom_ax.tick_params(which="major", labelsize=6, length=2, pad=2)
     zoom_ax.tick_params(which="minor", length=1)
 
 
 def save_diagnostics(figure, output_directory, stem, panel_names):
     """Save the overview and each panel, including its labels and colorbar."""
+
     # Freeze the layout before hiding neighboring panels for individual exports.
     # Preserve the full 3.5-inch width when trimming unused vertical space.
     figure.canvas.draw()
@@ -102,27 +104,18 @@ def plot_log_histogram(ax, density, edges):
     lower = float(positive.min()) / 2 if positive.size else 1e-6
     upper = float(positive.max()) * 2 if positive.size else 1.0
     ax.set_yscale("log")
-    ax.stairs(np.where(density > 0, density, np.nan), edges,
-              baseline=None, fill=False, color="black", linewidth=1.2)
+    ax.stairs(np.where(density > 0, density, np.nan), edges, baseline=None, fill=False, color="black", linewidth=1.2)
     ax.set_ylim(lower, upper)
 
 
 def potential_and_radial_gradient(R, z, parameters):
-    """Mirror model/potential.cpp in kpc, Myr, and solar masses; Phi(infinity)=0."""
-    G = 4.4985e-12
-    Md, ad, bd, Mb, ab, rho, rs = (
-        float(parameters[key]) for key in
-        ("M_d_Msun", "a_d_kpc", "b_d_kpc", "M_b_Msun", "a_b_kpc",
-         "rho_s_Msun_kpc3", "r_s_kpc")
-    )
-    r = np.hypot(R, z)
-    disk_squared = R**2 + (ad + np.sqrt(z**2 + bd**2))**2
-    halo_scale = 4 * np.pi * G * rho * rs**3
-    phi = (-G * Md / np.sqrt(disk_squared) - G * Mb / (r + ab)
-           - halo_scale * np.log1p(r / rs) / r)
-    dphi_dR = (G * Md * R / disk_squared**1.5 + G * Mb * R / (r * (r + ab)**2)
-               + halo_scale * R / r**3 * (np.log1p(r / rs) - r / (r + rs)))
-    return phi, dphi_dR
+    """Read the existing C++ potential and radial force, in kpc and Myr."""
+    radius, height = np.broadcast_arrays(np.asarray(R, dtype=float), np.asarray(z, dtype=float))
+    keys = ("M_d_Msun", "a_d_kpc", "b_d_kpc", "M_b_Msun", "a_b_kpc", "rho_s_Msun_kpc3", "r_s_kpc")
+    rows = run_calculation("potential", ("R_kpc", "z_kpc"), zip(radius.ravel(), height.ravel()),
+                           {key: float(parameters[key]) for key in keys})["values"]
+    return tuple(np.asarray([float(row[key]) for row in rows]).reshape(radius.shape)[()]
+                 for key in ("Phi_kpc2_Myr2", "dPhi_dR_kpc_Myr2"))
 
 
 def binned_weighted_median(x, y, values, weights, x_edges, y_edges):
@@ -173,16 +166,12 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
     # Rebin the saved returns more finely than the kernel grid for this display.
     # Keep the full saved radial range so the mass-conservation check includes
     # parcels outside the visible panel.
-    radial_lo = ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC * math.floor(
-        float(radius_edges[0]) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
-    )
+    radial_lo = ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC * math.floor(float(radius_edges[0]) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC)
     radial_hi = ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC * math.ceil(
         max(float(radius_edges[-1]), float(R.max()) if R.size else float(radius_edges[-1]))
         / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
     )
-    radial_bin_count = round(
-        (radial_hi - radial_lo) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC
-    )
+    radial_bin_count = round((radial_hi - radial_lo) / ANGULAR_MOMENTUM_R_BIN_WIDTH_KPC)
     radial_edges = np.linspace(radial_lo, radial_hi, radial_bin_count + 1)
     if R.size:
         _, gradient = potential_and_radial_gradient(R, 0.0, parameters)
@@ -256,18 +245,16 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
         for ax in (angular_ax, median_ax):
             ax.text(0.5, 0.5, "No returning parcels", ha="center", transform=ax.transAxes)
     angular_ax.set(xlabel=r"$R_{\rm land}$ [kpc]",
-                   ylabel=r"$j_{z,\rm land}/[R_{\rm land}v_c(R_{\rm land})]$",
+                   ylabel=quantity_unit_label(r"$j_{z,\rm land}/[R_{\rm land}v_c(R_{\rm land})]$"),
                    xlim=(0, 20),
                    ylim=(-ANGULAR_MOMENTUM_RATIO_LIMIT, ANGULAR_MOMENTUM_RATIO_LIMIT))
     median_ax.set_xlabel(r"$v_k$ [km s$^{-1}$]")
-    median_ax.set_ylabel(r"$\theta$ [${}^{\circ}$]", math_fontfamily="cm")
+    median_ax.set_ylabel(quantity_unit_label(r"$\theta$ [${}^{\circ}$]"), math_fontfamily="cm")
     median_ax.set(ylim=(0, 90), yticks=np.arange(0, 91, 15))
 
     # Include the full launch velocity, including disk rotation, in specific energy.
     phi, _ = potential_and_radial_gradient(values["R0_kpc"], values["z0_kpc"], parameters)
-    energy = phi / conversion**2 + 0.5 * sum(
-        values[key]**2 for key in ("vR0_kms", "vz0_kms", "vphi0_kms")
-    )
+    energy = phi / conversion**2 + 0.5 * sum(values[key]**2 for key in ("vR0_kms", "vz0_kms", "vphi0_kms"))
     if not np.all(np.isfinite(energy)):
         raise ValueError("Nonfinite launch energies")
     lo, hi = min(float(energy.min()), 0.0), max(float(energy.max()), 0.0)
@@ -303,7 +290,7 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
         raise ValueError("Energy histograms do not account for all launch statuses")
     energy_ax.set(yscale="log", ylim=(min(positive_densities) / 2, max(positive_densities) * 2),
                   xlabel=r"$E_0$ [km$^2$ s$^{-2}$]",
-                  ylabel=r"$\mathrm{d}f/\mathrm{d}E_0$ [s$^2$ km$^{-2}$]")
+                  ylabel=quantity_unit_label(r"$\mathrm{d}f/\mathrm{d}E_0$ [s$^2$ km$^{-2}$]"))
     energy_handles.append(energy_ax.axvline(0, color="black", linestyle=":", linewidth=1.2, label=r"$E_0=0$"))
     energy_ax.legend(handles=energy_handles)
     timed_out = statuses == "timed_out"
@@ -317,7 +304,7 @@ def plot_physical_diagnostics(axes, parcels, parameters, radius_edges):
         raise ValueError("Surface-deposition profile lost returned mass")
     plot_log_histogram(area_ax, area_density, radial_edges)
     area_ax.set(xlabel=r"$R_{\rm land}$ [kpc]",
-                ylabel=r"$\mathrm{d}f_{\rm ret}/\mathrm{d}A$ [kpc$^{-2}$]",
+                ylabel=quantity_unit_label(r"$\mathrm{d}f_{\rm ret}/\mathrm{d}A$ [kpc$^{-2}$]"),
                 xlim=(radial_edges[0], radial_edges[-1]))
     print(f"Surface-deposition profile integrates to {area_density @ annular_area:.6f} of launched mass.")
 
@@ -352,12 +339,11 @@ def plot_launches(parcels, run_directory, output_directory):
               r"Polar angle $\theta$ [${}^{\circ}$]", r"Kick azimuth $\psi$ [${}^{\circ}$]")
     plot_values = (radius, speed, np.rad2deg(theta), np.rad2deg(psi))
     for ax, array, label in zip(axes.flat, plot_values, labels):
-        ax.hist(array, bins=50, weights=weights, density=True,
-                color="#2166ac", alpha=0.45, label="Sampled launches")
+        ax.hist(array, bins=50, weights=weights, density=True, color="#2166ac", alpha=0.45, label="Sampled launches")
         ax.set(xlabel=label, ylabel="Probability density", ylim=(0, None))
     axes[1, 0].xaxis.label.set_math_fontfamily("cm")
     for ax in axes[1]:
-        ax.set_ylabel(r"Probability density [$({}^{\circ})^{-1}$]")
+        ax.set_ylabel(quantity_unit_label(r"Probability density [$({}^{\circ})^{-1}$]"))
 
     ax = axes[0, 0]
     if sigma_R == 0:
@@ -365,8 +351,7 @@ def plot_launches(parcels, run_directory, output_directory):
             raise ValueError("Fixed-ring draws do not match R_ring_kpc")
         ax.axvline(ring, color="black", label="Fixed ring")
     else:
-        lo, hi = (float(parameters[name]) for name in
-                  ("radius_cdf_min_kpc", "radius_cdf_max_kpc"))
+        lo, hi = (float(parameters[name]) for name in ("radius_cdf_min_kpc", "radius_cdf_max_kpc"))
         x = np.linspace(lo, hi, 2001)
         a, b = (lo - ring) / sigma_R, (hi - ring) / sigma_R
         normalization = (
@@ -391,12 +376,10 @@ def plot_launches(parcels, run_directory, output_directory):
         pdf = np.sin(x) * np.exp(-0.5 * (x / sigma_theta)**2)
         pdf /= np.sum(0.5 * (pdf[1:] + pdf[:-1]) * np.diff(x))
         ax.plot(np.rad2deg(x), pdf * np.pi / 180, color="black", label="Gaussian per solid angle")
-    axes[1, 1].plot([0, 360], [1 / 360] * 2,
-                    color="black", label="Uniform azimuth")
+    axes[1, 1].plot([0, 360], [1 / 360] * 2, color="black", label="Uniform azimuth")
     for ax in axes.flat:
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02))
-    save_diagnostics(figure, output_directory, "launch",
-                     ("radius", "kick_speed", "polar_angle", "azimuth"))
+    save_diagnostics(figure, output_directory, "launch", ("radius", "kick_speed", "polar_angle", "azimuth"))
     print(f"Mean kick speed: {np.average(speed, weights=weights):.3f} km/s; "
           f"Maxwell expectation: {math.sqrt(8 / math.pi) * h_v:.3f}")
     print(f"RMS kick speed: {np.sqrt(np.average(speed**2, weights=weights)):.3f} km/s; "
@@ -416,9 +399,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
     if not np.all(np.isfinite(weights)) or np.any(weights < 0) or total_weight <= 0:
         raise ValueError("Launch weights must be finite and nonnegative with positive total")
 
-    cells = np.atleast_1d(np.genfromtxt(
-        run_directory / "kernel.csv", delimiter=",", names=True,
-    ))
+    cells = np.atleast_1d(np.genfromtxt(run_directory / "kernel.csv", delimiter=",", names=True))
     radius_edges = np.unique(np.concatenate((cells["R_lo_kpc"], cells["R_hi_kpc"])))
     delay_edges = np.unique(np.concatenate((cells["tau_lo_Myr"], cells["tau_hi_Myr"])))
     radius_indices = np.searchsorted(radius_edges, cells["R_lo_kpc"])
@@ -457,7 +438,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
     extra_panels = "v_k_kms" in parcels[0]
 
     smplotlib.set_style(usetex=False, fontsize=9, figsize=SINGLE_COLUMN_FIGURE_SIZE, dpi=144)
-    plt.rcParams.update({
+    plt.rcParams.update({"axes.prop_cycle": color_cycle(),
         "axes.grid": False, "axes.labelsize": 9, "axes.linewidth": 0.8,
         "xtick.direction": "in", "ytick.direction": "in",
         "xtick.labelsize": 8, "ytick.labelsize": 8,
@@ -495,9 +476,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         where=total_density > 0,
     )
     angular_ratio = landed_angular_momentum / circular_angular_momentum[:, None]
-    effective_entrainment = np.divide(
-        new_density, density, out=np.full_like(density, np.nan), where=density > 0,
-    )
+    effective_entrainment = np.divide(new_density, density, out=np.full_like(density, np.nan), where=density > 0)
 
     moment_figure, moment_axes = diagnostic_page(2, 2)
     scalar_panels = (
@@ -515,7 +494,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
             radius_edges, delay_edges, np.ma.masked_where(~np.isfinite(grid.T) | (grid.T <= 0), grid.T),
             cmap=color_map, norm=norm, shading="flat", rasterized=True,
         )
-        ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
+        ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=quantity_unit_label(r"$\tau$ [Myr]"))
         square_colorbar(mesh, ax, label)
         if ax is moment_axes[0, 0]:
             add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, norm)
@@ -526,10 +505,8 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         cmap="RdBu_r", norm=SymLogNorm(linthresh=0.1, vmin=-2, vmax=2, base=10, clip=True),
         shading="flat", rasterized=True,
     )
-    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
-    square_colorbar(
-        mesh, ax, r"$j_{\rm land}(R,\tau)/[R_{\rm land}v_c(R_{\rm land})]$", extend="both",
-    )
+    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=quantity_unit_label(r"$\tau$ [Myr]"))
+    square_colorbar(mesh, ax, r"$j_{\rm land}(R,\tau)/[R_{\rm land}v_c(R_{\rm land})]$", extend="both")
     save_diagnostics(
         moment_figure, output_directory, "kernel_moments",
         ("wind", "new_cgm", "landed_angular_momentum", "effective_entrainment"),
@@ -563,15 +540,12 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
             width = edges[-1] - edges[-2]
             extra = max(0, math.ceil((float(values.max()) - edges[-1]) / width))
             velocity_edges.append(np.r_[edges, edges[-1] + width * np.arange(1, extra + 1)])
-        bin_mass, _, _ = np.histogram2d(
-            returned_radii, returned_delays, bins=velocity_edges, weights=returned_weights,
-        )
+        bin_mass, _, _ = np.histogram2d(returned_radii, returned_delays, bins=velocity_edges, weights=returned_weights)
         bin_momentum, _, _ = np.histogram2d(
             returned_radii, returned_delays, bins=velocity_edges,
             weights=returned_weights * launch_vz,
         )
-        mean_vz = np.divide(bin_momentum, bin_mass, out=np.full_like(bin_mass, np.nan),
-                            where=bin_mass > 0)
+        mean_vz = np.divide(bin_momentum, bin_mass, out=np.full_like(bin_mass, np.nan), where=bin_mass > 0)
         if not np.isclose(bin_mass.sum(), returned_fraction, atol=1e-12, rtol=1e-10):
             raise ValueError("Velocity heatmap lost returned mass")
         velocity_map = plt.get_cmap("viridis").copy()
@@ -583,7 +557,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         square_colorbar(velocity_mesh, ax, label=r"$\langle v_{z,0}\rangle_M$ [km s$^{-1}$]")
     else:
         ax.text(0.5, 0.5, "No returning parcels", ha="center", transform=ax.transAxes)
-    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
+    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=quantity_unit_label(r"$\tau$ [Myr]"))
 
     ax = kernel_ax
     color_map = plt.get_cmap("magma").copy()
@@ -598,18 +572,18 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         cmap=color_map, shading="flat", norm=LogNorm(vmin=vmin, vmax=vmax), rasterized=True,
     )
     square_colorbar(mesh, ax, label=r"$K(R_{\rm land},\tau)$ [kpc$^{-2}$ Myr$^{-1}$]")
-    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=r"$\tau$ [Myr]")
+    ax.set(xlabel=r"$R_{\rm land}$ [kpc]", ylabel=quantity_unit_label(r"$\tau$ [Myr]"))
 
     add_kernel_zoom(ax, density, radius_edges, delay_edges, color_map, mesh.norm)
     plot_log_histogram(radius_ax, radius_density, radius_edges)
     radius_ax.set(
         xlabel=r"$R_{\rm land}$ [kpc]",
-        ylabel=r"$\mathrm{d}f_{\rm ret}/\mathrm{d}R_{\rm land}$ [kpc$^{-1}$]",
+        ylabel=quantity_unit_label(r"$\mathrm{d}f_{\rm ret}/\mathrm{d}R_{\rm land}$ [kpc$^{-1}$]"),
     )
     plot_log_histogram(delay_ax, delay_density, delay_edges)
     delay_ax.set(
         xlabel=r"$\tau$ [Myr]",
-        ylabel=r"$\mathrm{d}f_{\rm ret}/\mathrm{d}\tau$ [Myr$^{-1}$]",
+        ylabel=quantity_unit_label(r"$\mathrm{d}f_{\rm ret}/\mathrm{d}\tau$ [Myr$^{-1}$]"),
     )
 
     radius_limit, delay_limit = radius_edges[-1], delay_edges[-1]
@@ -628,13 +602,10 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         displacement = returned_radii - np.array([float(row["R0_kpc"]) for row in returned])
         ax = displacement_ax
         if returned:
-            displacement_mass, displacement_edges = np.histogram(
-                displacement, bins=120, weights=returned_weights,
-            )
+            displacement_mass, displacement_edges = np.histogram(displacement, bins=120, weights=returned_weights)
             if not np.isclose(displacement_mass.sum(), returned_fraction, atol=1e-12, rtol=1e-10):
                 raise ValueError("Displacement histogram lost returned mass")
-            plot_log_histogram(ax, displacement_mass / np.diff(displacement_edges),
-                               displacement_edges)
+            plot_log_histogram(ax, displacement_mass / np.diff(displacement_edges), displacement_edges)
             inward = returned_weights[displacement < 0].sum()
             outward = returned_weights[displacement > 0].sum()
             ax.text(0.97, 0.95,
@@ -645,7 +616,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
             ax.text(0.5, 0.5, "No returning parcels", ha="center", transform=ax.transAxes)
         ax.axvline(0, color="black", linestyle="--", linewidth=1.2)
         ax.set(xlabel=r"$\Delta R=R_{\rm land}-R_0$ [kpc]",
-               ylabel=r"$\mathrm{d}f_{\rm ret}/\mathrm{d}\Delta R$ [kpc$^{-1}$]")
+               ylabel=quantity_unit_label(r"$\mathrm{d}f_{\rm ret}/\mathrm{d}\Delta R$ [kpc$^{-1}$]"))
 
         speeds = np.array([float(row["v_k_kms"]) for row in parcels])
         if not np.all(np.isfinite(speeds)) or np.any(speeds < 0):
@@ -654,14 +625,12 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
         launch_mass, _ = np.histogram(speeds, bins=speed_edges, weights=weights / total_weight)
         returned_speeds = np.array([float(row["v_k_kms"]) for row in returned])
         return_mass, _ = np.histogram(returned_speeds, bins=speed_edges, weights=returned_weights)
-        fraction = np.divide(return_mass, launch_mass, out=np.full_like(launch_mass, np.nan),
-                             where=launch_mass > 0)
+        fraction = np.divide(return_mass, launch_mass, out=np.full_like(launch_mass, np.nan), where=launch_mass > 0)
         if np.any(fraction[np.isfinite(fraction)] > 1 + 1e-10):
             raise ValueError("Return fraction exceeds one in a kick-speed bin")
         ax = fraction_ax
         ax.stairs(fraction, speed_edges, baseline=None, color="black", linewidth=1.2)
-        ax.set(xlabel=r"$v_k$ [km s$^{-1}$]", ylabel=r"$f_{\rm ret}$",
-               xlim=(0, speed_edges[-1]), ylim=(0, 1.05))
+        ax.set(xlabel=r"$v_k$ [km s$^{-1}$]", ylabel=r"$f_{\rm ret}$", xlim=(0, speed_edges[-1]), ylim=(0, 1.05))
 
         components = (
             (r"Returned nuclear", r"f_{\rm ret}", density, (0, (4.0, 3.0))),
@@ -669,10 +638,8 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
             (r"Total landing", r"f_{\rm tot}", total_density, "-"),
         )
         for ax, coordinate, edges, xlabel, ylabel in (
-            (cumulative_radius_ax, "radius", radius_edges, r"$R_{\rm land}$ [kpc]",
-             r"$F_x(<R_{\rm land})/f_x$"),
-            (cumulative_delay_ax, "delay", delay_edges, r"$\tau$ [Myr]",
-             r"$F_x(<\tau)/f_x$"),
+            (cumulative_radius_ax, "radius", radius_edges, r"$R_{\rm land}$ [kpc]", r"$F_x(<R_{\rm land})/f_x$"),
+            (cumulative_delay_ax, "delay", delay_edges, r"$\tau$ [Myr]", r"$F_x(<\tau)/f_x$"),
         ):
             for name, symbol, grid, linestyle in components:
                 if coordinate == "radius":
@@ -688,7 +655,7 @@ def plot_kernel(run_directory, output_directory, full_grid=False):
                     linewidth=1.2, dash_capstyle="round",
                     label=rf"{name}: ${symbol}={total:.6f}$",
                 )
-            ax.set(xlabel=xlabel, ylabel=ylabel, xlim=(edges[0], edges[-1]), ylim=(0, 1.05))
+            ax.set(xlabel=xlabel, ylabel=quantity_unit_label(ylabel), xlim=(edges[0], edges[-1]), ylim=(0, 1.05))
             ax.legend(loc="lower right")
 
         plot_physical_diagnostics(physical_axes, parcels, parameters, radius_edges)

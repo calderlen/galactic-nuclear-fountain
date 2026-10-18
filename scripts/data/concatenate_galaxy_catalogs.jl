@@ -13,7 +13,7 @@ const BIGIEL_RADIAL = joinpath(INPUT, "bigiel2010", "RadialProfiles.csv")
 
 const OUTDIR = INPUT
 
-const ALIASES = Dict("HOI"  => "UGC5139", "HOII" => "UGC4305") # necessary because 
+const ALIASES = Dict("HOI" => "UGC5139", "HOII" => "UGC4305")
 # Leroy et al. (2008) derive their spiral-galaxy H2 columns from HERACLES
 # CO(2-1), with BIMA SONG/other CO used outside this target list.
 const HERACLES_GALAXIES = Set([
@@ -53,11 +53,9 @@ function field(line, a, b)
     strip(line[a:b])
 end
 
-floatfield(line, a, b) =
-    something(tryparse(Float64, field(line, a, b)), missing)
+floatfield(line, a, b) = something(tryparse(Float64, field(line, a, b)), missing)
 
-intfield(line, a, b) =
-    something(tryparse(Int, field(line, a, b)), missing)
+intfield(line, a, b) = something(tryparse(Int, field(line, a, b)), missing)
 
 pow10(x) = ismissing(x) ? missing : 10.0^x
 
@@ -229,17 +227,13 @@ function read_leroy_radial(path)
             SigmaStar_Msun_pc2 = floatfield(line, 42, 48),
             e_SigmaStar_Msun_pc2 = floatfield(line, 50, 54),
 
-            SigmaSFR_Msun_yr_kpc2 =
-                ismissing(sfr) ? missing : sfr * 1e-4,
+            SigmaSFR_Msun_yr_kpc2 = ismissing(sfr) ? missing : sfr * 1e-4,
 
-            e_SigmaSFR_Msun_yr_kpc2 =
-                ismissing(e_sfr) ? missing : e_sfr * 1e-4,
+            e_SigmaSFR_Msun_yr_kpc2 = ismissing(e_sfr) ? missing : e_sfr * 1e-4,
 
-            SigmaSFR_FUV_Msun_yr_kpc2 =
-                ismissing(sfr_fuv) ? missing : sfr_fuv * 1e-4,
+            SigmaSFR_FUV_Msun_yr_kpc2 = ismissing(sfr_fuv) ? missing : sfr_fuv * 1e-4,
 
-            SigmaSFR_24_Msun_yr_kpc2 =
-                ismissing(sfr_24) ? missing : sfr_24 * 1e-4,
+            SigmaSFR_24_Msun_yr_kpc2 = ismissing(sfr_24) ? missing : sfr_24 * 1e-4,
         ))
     end
 
@@ -258,12 +252,10 @@ function read_bigiel_radial(path)
         :e_SigmaSFR_Msun_yr_kpc2,
     ]
     missing_columns = setdiff(required, propertynames(radial))
-    isempty(missing_columns) ||
-        error("Bigiel radial table is missing columns: $(join(missing_columns, ", "))")
+    isempty(missing_columns) || error("Bigiel radial table is missing columns: $(join(missing_columns, ", "))")
 
     radial.galaxy = normalize_name.(radial.galaxy)
-    all(radial.R_R25 .>= 1.0) ||
-        error("Bigiel radial table must contain only outer-disk points at R/R25 >= 1")
+    all(radial.R_R25 .>= 1.0) || error("Bigiel radial table must contain only outer-disk points at R/R25 >= 1")
     return radial
 end
 
@@ -283,10 +275,7 @@ galaxies.in_heracles = in.(galaxies.galaxy, Ref(HERACLES_GALAXIES))
 
 sort!(galaxies, :galaxy)
 
-triple = filter(
-    row -> row.in_sparc && row.in_things && row.in_leroy && row.Q_sparc == 1,
-    galaxies,
-)
+triple = filter(row -> row.in_sparc && row.in_things && row.in_leroy && row.Q_sparc == 1, galaxies)
 all(triple.Q_sparc .== 1) || error("The overlap sample contains a SPARC galaxy with Q != 1")
 
 rotation_curves = read_sparc_rotation_curves(SPARC_RC_FILE)

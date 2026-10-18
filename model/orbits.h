@@ -3,6 +3,8 @@
 # include "rk4.h"
 # include <limits>
 
+struct CGMAMDSolution;
+
 struct OrbitParameters {
     double M_d; // disk mass [M_sun]
     double a_d; // disk scale length [kpc]
@@ -19,6 +21,7 @@ struct OrbitParameters {
     double C_D = 0.0;
     double epsilon = 0.0;
     double beta = 0.0;    // v_phi,CGM / v_c(R)
+    const CGMAMDSolution* cgm = nullptr; // solved local CGM; must outlive the orbit
 };
 
 double circular_velocity(double R, const OrbitParameters& parameters); // [kpc/Myr]

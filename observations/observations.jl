@@ -7,12 +7,8 @@ using Statistics
 
 const DEFAULT_INPUT_DIR = normpath(joinpath(@__DIR__, "..", "input"))
 
-const GALAXY_ALIASES = Dict(
-    "HOI" => "UGC5139",
-    "HOII" => "UGC4305",
-)
+const GALAXY_ALIASES = Dict("HOI" => "UGC5139", "HOII" => "UGC4305")
 const SFR_CROSSCALIBRATION_R_R25 = (0.9, 1.2)
-
 
 function normalize_galaxy_name(name)
     compact = uppercase(replace(strip(string(name)), r"[\s,-]" => ""))
@@ -25,33 +21,19 @@ function normalize_galaxy_name(name)
     return get(GALAXY_ALIASES, compact, compact)
 end
 
-
 """Fit an uncertainty-weighted cubic smoothing spline without extrapolation."""
-function fit_uncertainty_weighted_smoothing_spline(
-    R_values,
-    values,
-    error_values;
-    description,
-)
+function fit_uncertainty_weighted_smoothing_spline(R_values, values, error_values; description)
     R = Float64.(R_values)
     y = Float64.(values)
     errors = Float64.(error_values)
 
     all(isfinite.(R)) || error("$description spline radii must be finite")
     all(isfinite.(y)) || error("$description spline values must be finite")
-    all(isfinite.(errors) .& (errors .> 0)) ||
-        error("$description spline uncertainties must be finite and positive")
+    all(isfinite.(errors) .& (errors .> 0)) || error("$description spline uncertainties must be finite and positive")
     all(diff(R) .> 0) || error("$description spline radii must be strictly increasing")
 
     weights = 1.0 ./ errors
-    spline = Spline1D(
-        R,
-        y;
-        w=weights,
-        k=3,
-        s=length(R),
-        bc="error",
-    )
+    spline = Spline1D(R, y; w=weights, k=3, s=length(R), bc="error")
     fitted = spline(R)
     fitted_derivative = derivative(spline, R)
 
@@ -64,30 +46,16 @@ function fit_uncertainty_weighted_smoothing_spline(
     )
 end
 
-
 fit_sparc_smoothing_spline(R_values, V_values, error_values) =
-    fit_uncertainty_weighted_smoothing_spline(
-        R_values,
-        V_values,
-        error_values;
-        description="SPARC rotation-curve",
-    )
-
+    fit_uncertainty_weighted_smoothing_spline(R_values, V_values, error_values; description="SPARC rotation-curve")
 
 fit_gas_smoothing_spline(R_values, Sigma_values, error_values) =
-    fit_uncertainty_weighted_smoothing_spline(
-        R_values,
-        Sigma_values,
-        error_values;
-        description="gas-profile",
-    )
-
+    fit_uncertainty_weighted_smoothing_spline(R_values, Sigma_values, error_values; description="gas-profile")
 
 function fit_sfr_smoothing_spline(R_values, Sigma_values, error_values)
     values = Float64.(Sigma_values)
     errors = Float64.(error_values)
-    all(values .> 0) ||
-        error("Star-formation surface densities must be positive for the log spline")
+    all(values .> 0) || error("Star-formation surface densities must be positive for the log spline")
 
     # The combined inner/outer profile spans several decades. Fit ln(SigmaSFR)
     # with propagated fractional errors so the cubic spline remains positive.
@@ -107,19 +75,16 @@ function fit_sfr_smoothing_spline(R_values, Sigma_values, error_values)
     )
 end
 
-
 """Linearly interpolate a positive uncertainty profile without extrapolation."""
 function interpolate_sorted(x_values, y_values, query)
     x = Float64.(x_values)
     y = Float64.(y_values)
-    x[1] <= query <= x[end] ||
-        throw(DomainError(query, "interpolation query is outside the measured support"))
+    x[1] <= query <= x[end] || throw(DomainError(query, "interpolation query is outside the measured support"))
     query == x[end] && return y[end]
     index = searchsortedlast(x, query)
     fraction = (query - x[index]) / (x[index + 1] - x[index])
     return y[index] + fraction * (y[index + 1] - y[index])
 end
-
 
 """
 Cross-calibrate Bigiel's FUV-only SFR scale to Leroy's FUV+24 micron scale.
@@ -145,11 +110,7 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
         sort!(leroy, :R_R25)
         nrow(leroy) >= 4 || continue
 
-        leroy_spline = fit_sfr_smoothing_spline(
-            leroy.R_R25,
-            leroy.SigmaSFR_Msun_yr_kpc2,
-            leroy.e_SigmaSFR_Msun_yr_kpc2,
-        )
+        leroy_spline = fit_sfr_smoothing_spline(leroy.R_R25, leroy.SigmaSFR_Msun_yr_kpc2, leroy.e_SigmaSFR_Msun_yr_kpc2)
         lower = max(lower_window, leroy_spline.support[1])
         upper = min(upper_window, leroy_spline.support[2])
         lower < upper || continue
@@ -161,18 +122,11 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
         for row in eachrow(bigiel)
             R_R25 = Float64(row.R_R25)
             leroy_value = leroy_spline.v(R_R25)
-            leroy_error = interpolate_sorted(
-                leroy.R_R25,
-                leroy.e_SigmaSFR_Msun_yr_kpc2,
-                R_R25,
-            )
+            leroy_error = interpolate_sorted(leroy.R_R25, leroy.e_SigmaSFR_Msun_yr_kpc2, R_R25)
             bigiel_value = Float64(row.SigmaSFR_Msun_yr_kpc2)
             bigiel_error = Float64(row.e_SigmaSFR_Msun_yr_kpc2)
             log_ratio = log(leroy_value / bigiel_value)
-            log_ratio_error = hypot(
-                leroy_error / leroy_value,
-                bigiel_error / bigiel_value,
-            )
+            log_ratio_error = hypot(leroy_error / leroy_value, bigiel_error / bigiel_value)
             push!(diagnostic_rows, (
                 galaxy=galaxy,
                 R_R25=R_R25,
@@ -194,17 +148,13 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
     for group in groupby(diagnostics, :galaxy)
         galaxy = String(first(group.galaxy))
         weight_sum = sum(group.weight)
-        log_factor =
-            sum(group.weight .* group.log_Leroy_over_Bigiel) / weight_sum
+        log_factor = sum(group.weight .* group.log_Leroy_over_Bigiel) / weight_sum
         formal_uncertainty = sqrt(inv(weight_sum))
         log_scatter = nrow(group) > 1 ? sqrt(
             sum(group.weight .* (group.log_Leroy_over_Bigiel .- log_factor).^2) /
             weight_sum
         ) : 0.0
-        log_uncertainty = hypot(
-            formal_uncertainty,
-            log_scatter / sqrt(nrow(group)),
-        )
+        log_uncertainty = hypot(formal_uncertainty, log_scatter / sqrt(nrow(group)))
         galaxy_calibrations[galaxy] = (
             factor=exp(log_factor),
             log_factor=log_factor,
@@ -214,8 +164,7 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
         )
     end
 
-    length(galaxy_calibrations) >= 2 ||
-        error("SFR cross-calibration requires at least two overlap galaxies")
+    length(galaxy_calibrations) >= 2 || error("SFR cross-calibration requires at least two overlap galaxies")
     galaxy_log_offsets = [value.log_factor for value in values(galaxy_calibrations)]
     global_log_factor = mean(galaxy_log_offsets)
     galaxy_scatter = std(galaxy_log_offsets; corrected=true)
@@ -226,17 +175,14 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
         [galaxy_calibrations[String(galaxy)].log_factor for galaxy in diagnostics.galaxy]
     diagnostics.galaxy_overlap_point_count =
         [galaxy_calibrations[String(galaxy)].point_count for galaxy in diagnostics.galaxy]
-    diagnostics.galaxy_crosscal_factor =
-        [galaxy_calibrations[String(galaxy)].factor for galaxy in diagnostics.galaxy]
+    diagnostics.galaxy_crosscal_factor = [galaxy_calibrations[String(galaxy)].factor for galaxy in diagnostics.galaxy]
     diagnostics.galaxy_crosscal_log_uncertainty =
         [galaxy_calibrations[String(galaxy)].log_uncertainty for galaxy in diagnostics.galaxy]
     diagnostics.galaxy_log_ratio_scatter =
         [galaxy_calibrations[String(galaxy)].log_scatter for galaxy in diagnostics.galaxy]
     diagnostics.global_summary_crosscal_factor = fill(global_factor, nrow(diagnostics))
-    diagnostics.global_crosscal_log_uncertainty =
-        fill(global_log_uncertainty, nrow(diagnostics))
-    diagnostics.galaxy_to_galaxy_log_scatter =
-        fill(galaxy_scatter, nrow(diagnostics))
+    diagnostics.global_crosscal_log_uncertainty = fill(global_log_uncertainty, nrow(diagnostics))
+    diagnostics.galaxy_to_galaxy_log_scatter = fill(galaxy_scatter, nrow(diagnostics))
     diagnostics.calibration_R_R25_min = fill(lower_window, nrow(diagnostics))
     diagnostics.calibration_R_R25_max = fill(upper_window, nrow(diagnostics))
 
@@ -250,7 +196,6 @@ function cross_calibrate_bigiel_sfr(leroy_radial, bigiel_radial)
         diagnostics=diagnostics,
     )
 end
-
 
 """
 Load one galaxy's Leroy and Bigiel disk profiles and SPARC kinematics.
@@ -299,26 +244,21 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
     e_SigmaH2 = coalesce.(radial.e_SigmaH2_Msun_pc2, 0.0)
 
     radial.SigmaH2_used_Msun_pc2 = SigmaH2_used
-    radial.Sigma_g_Msun_kpc2 =
-        1e6 .* (radial.SigmaHI_Msun_pc2 .+ SigmaH2_used)
-    radial.e_Sigma_g_Msun_kpc2 =
-        1e6 .* sqrt.(e_SigmaHI.^2 .+ e_SigmaH2.^2)
+    radial.Sigma_g_Msun_kpc2 = 1e6 .* (radial.SigmaHI_Msun_pc2 .+ SigmaH2_used)
+    radial.e_Sigma_g_Msun_kpc2 = 1e6 .* sqrt.(e_SigmaHI.^2 .+ e_SigmaH2.^2)
 
     bigiel = bigiel_all[bigiel_all.galaxy .== galaxy, :]
     sort!(bigiel, :R_R25)
     if nrow(bigiel) > 0
         R25_adopted = Float64(metadata.R25_leroy_kpc)
         bigiel.R_kpc = bigiel.R_R25 .* R25_adopted
-        bigiel.Sigma_g_Msun_kpc2 = 1e6 .* bigiel.SigmaHI_Msun_pc2
-        bigiel.e_Sigma_g_Msun_kpc2 = 1e6 .* bigiel.e_SigmaHI_Msun_pc2
-        bigiel.SigmaSFR_Bigiel_raw_Msun_yr_kpc2 =
-            copy(bigiel.SigmaSFR_Msun_yr_kpc2)
-        bigiel.e_SigmaSFR_stat_Bigiel_raw_Msun_yr_kpc2 =
-            copy(bigiel.e_SigmaSFR_stat_Msun_yr_kpc2)
-        bigiel.e_SigmaSFR_Bigiel_raw_Msun_yr_kpc2 =
-            copy(bigiel.e_SigmaSFR_Msun_yr_kpc2)
-        isfinite(applied_sfr_crosscalibration.factor) ||
-            error("No SFR cross-calibration is available for $galaxy")
+        # Bigiel quotes hydrogen only; include helium to match Leroy's gas convention.
+        bigiel.Sigma_g_Msun_kpc2 = 1.36e6 .* bigiel.SigmaHI_Msun_pc2
+        bigiel.e_Sigma_g_Msun_kpc2 = 1.36e6 .* bigiel.e_SigmaHI_Msun_pc2
+        bigiel.SigmaSFR_Bigiel_raw_Msun_yr_kpc2 = copy(bigiel.SigmaSFR_Msun_yr_kpc2)
+        bigiel.e_SigmaSFR_stat_Bigiel_raw_Msun_yr_kpc2 = copy(bigiel.e_SigmaSFR_stat_Msun_yr_kpc2)
+        bigiel.e_SigmaSFR_Bigiel_raw_Msun_yr_kpc2 = copy(bigiel.e_SigmaSFR_Msun_yr_kpc2)
+        isfinite(applied_sfr_crosscalibration.factor) || error("No SFR cross-calibration is available for $galaxy")
         factor = applied_sfr_crosscalibration.factor
         log_uncertainty = applied_sfr_crosscalibration.log_uncertainty
         bigiel.SigmaSFR_Msun_yr_kpc2 .*= factor
@@ -373,16 +313,8 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
     ))
     sort!(sfr_measurements, :R_kpc)
 
-    gas_spline = fit_gas_smoothing_spline(
-        gas_measurements.R_kpc,
-        gas_measurements.value,
-        gas_measurements.error,
-    )
-    sfr_spline = fit_sfr_smoothing_spline(
-        sfr_measurements.R_kpc,
-        sfr_measurements.value,
-        sfr_measurements.error,
-    )
+    gas_spline = fit_gas_smoothing_spline(gas_measurements.R_kpc, gas_measurements.value, gas_measurements.error)
+    sfr_spline = fit_sfr_smoothing_spline(sfr_measurements.R_kpc, sfr_measurements.value, sfr_measurements.error)
     sparc = CSV.read(joinpath(input_dir, "sparc_rotation_curves.csv"), DataFrame)
     sparc = sparc[sparc.galaxy .== galaxy, :]
     sparc = sparc[.!ismissing.(sparc.R_kpc) .&
@@ -405,11 +337,7 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
     sparc.Vobs_adopted_kms = sparc.Vobs_kms .* velocity_scale
     sparc.e_Vobs_adopted_kms = sparc.e_Vobs_kms .* abs(velocity_scale)
 
-    sparc_spline = fit_sparc_smoothing_spline(
-        sparc.R_adopted_kpc,
-        sparc.Vobs_adopted_kms,
-        sparc.e_Vobs_adopted_kms,
-    )
+    sparc_spline = fit_sparc_smoothing_spline(sparc.R_adopted_kpc, sparc.Vobs_adopted_kms, sparc.e_Vobs_adopted_kms)
 
     sparc_bounds = (minimum(sparc.R_adopted_kpc), maximum(sparc.R_adopted_kpc))
     common_bounds = (

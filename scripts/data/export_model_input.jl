@@ -1,6 +1,12 @@
 using CSV
 using DataFrames
 
+# The default remains the selected galaxy configuration; a batch run can supply
+# its explicit per-galaxy configuration as the third argument.
+config_path = length(ARGS) >= 3 ? abspath(ARGS[3]) :
+    joinpath(@__DIR__, "..", "..", "config", "galaxies", "NGC3198", "steady.csv")
+config_galaxy = basename(dirname(config_path))
+
 include(joinpath(@__DIR__, "..", "..", "observations", "observations.jl"))
 using .Observations
 
@@ -10,29 +16,29 @@ function forward_model_bounds(observations; scan_point_count=10_001)
     R_scan = collect(range(R_min, R_max, length=scan_point_count))
     dj_disk_dR = observations.sparc_spline.v.(R_scan) .+
         R_scan .* observations.sparc_spline.dv_dR.(R_scan)
-    all(isfinite.(dj_disk_dR)) ||
-        error("The SPARC spline produced a non-finite angular-momentum derivative")
+    all(isfinite.(dj_disk_dR)) || error("The SPARC spline produced a non-finite angular-momentum derivative")
 
     first_nonpositive = findfirst(dj_disk_dR .<= 0)
     first_nonpositive === nothing && return (R_min, R_max, false)
-    first_nonpositive > 1 ||
-        error("The SPARC spline has non-increasing angular momentum at the inner model boundary")
+    first_nonpositive > 1 || error("The SPARC spline has non-increasing angular momentum at the inner model boundary")
 
     # With sub-circular landed gas and inward flow, d(R*v_c)/dR <= 0 would
     # force a negative landing rate. Exclude that outer spline-edge segment.
     return (R_min, R_scan[first_nonpositive - 1], true)
 end
 
-galaxy = length(ARGS) >= 1 ? ARGS[1] : "NGC3198"
+galaxy = length(ARGS) >= 1 ? ARGS[1] : config_galaxy
 observations = Observations.load_galaxy_observations(galaxy)
+observations.galaxy == config_galaxy || error("The galaxy must match the config directory: $config_path")
 output_directory = length(ARGS) >= 2 ? normpath(ARGS[2]) : joinpath(@__DIR__, "..", "..", "input", "model_inputs", observations.galaxy)
-config_path = length(ARGS) >= 3 ? ARGS[3] : joinpath(@__DIR__, "..", "..", "config", "steady.csv")
 config = Dict(String(row.name) => (ismissing(row.value) ? "" : string(row.value))
               for row in CSV.File(config_path; types=String))
 setting(name, default="") = isempty(get(config, name, "")) ? string(default) : config[name]
 number(name, default="") = parse(Float64, setting(name, default))
 isempty(setting("Mdot_nuc_Msun_yr")) && error("Set Mdot_nuc_Msun_yr in $config_path to the nuclear SFR; the galaxy-wide catalog SFR is not this quantity")
 Mdot_nuc = number("Mdot_nuc_Msun_yr")
+source_normalization = setting("source_normalization", "configured")
+nuclear_SFR_origin = setting("nuclear_SFR_origin", "supplied_config")
 eta = number("eta")
 mu, beta = number("mu"), number("beta")
 return_fraction = number("return_fraction")
@@ -54,11 +60,14 @@ parameters = [
     "profile_type" => "tabulated", "galaxy" => observations.galaxy,
     "R_nucl_kpc" => string(R_nucl), "R_in_kpc" => string(R_in), "R_out_kpc" => string(R_out),
     "v_c_nucl_kms" => vc_nucl, "Mdot_nuc_Msun_yr" => string(Mdot_nuc),
+    "surface_rate_time_unit" => "Gyr",
     "eta" => string(eta), "Mdot_land_Msun_yr" => string(eta*(1+mu)*Mdot_nuc),
     "Mdot_out_Msun_yr" => setting("Mdot_out_Msun_yr", "auto"),
     "mu" => string(mu), "beta" => string(beta),
+    "lambda" => setting("lambda", 2),
     "return_fraction" => string(return_fraction), "stellar_sink" => "net_locked_mass",
-    "nuclear_SFR_origin" => "supplied_config", "input_config" => abspath(config_path),
+    "source_normalization" => source_normalization,
+    "nuclear_SFR_origin" => nuclear_SFR_origin, "input_config" => abspath(config_path),
 ]
 for name in ("Z_nucl", "Z_CGM", "yield_y", "Z_outer_boundary", "n_points", "h_0_kpc", "rtol", "dynamics_atol", "metallicity_atol")
     push!(parameters, name => setting(name))
@@ -67,8 +76,10 @@ CSV.write(joinpath(output_directory, "parameters.csv"), DataFrame(name=first.(pa
 cp(config_path, joinpath(output_directory, "config.csv"); force=true)
 
 spline_point_count = 750
-# Include the model endpoints exactly, including the launch point when R_in=R_nucl.
-R_spline = sort(unique(vcat(collect(range(R_spline_min, R_spline_max, length=spline_point_count)), [R_in, R_out])))
+# Include the launch point whenever it has measured disk support, so the
+# tabulated rotation and explicit nuclear circular speed agree there exactly.
+R_extra = R_spline_min <= R_nucl <= R_spline_max ? [R_nucl, R_in, R_out] : [R_in, R_out]
+R_spline = sort(unique(vcat(collect(range(R_spline_min, R_spline_max, length=spline_point_count)), R_extra)))
 spline_point_count = length(R_spline)
 
 gas_spline_support = observations.gas_spline.support
@@ -78,13 +89,12 @@ Sigma_g_spline = observations.gas_spline.v.(R_spline)
 dSigma_g_spline = observations.gas_spline.dv_dR.(R_spline)
 all(isfinite.(Sigma_g_spline) .& (Sigma_g_spline .> 0)) ||
     error("The exported gas spline contains non-finite or non-positive values")
-all(isfinite.(dSigma_g_spline)) ||
-    error("The exported gas spline contains non-finite derivatives")
+all(isfinite.(dSigma_g_spline)) || error("The exported gas spline contains non-finite derivatives")
 
 SFR_spline_support = observations.sfr_spline.support
 R_spline_min >= SFR_spline_support[1] && R_spline_max <= SFR_spline_support[2] ||
     error("The exported star-formation spline range lies outside its measured support")
-Sigmadot_star_spline = (1-return_fraction) .* observations.sfr_spline.v.(R_spline)
+Sigmadot_star_spline = 1e9 .* (1-return_fraction) .* observations.sfr_spline.v.(R_spline)
 all(isfinite.(Sigmadot_star_spline) .& (Sigmadot_star_spline .> 0)) ||
     error("The exported star-formation spline contains non-finite or non-positive values")
 
@@ -94,7 +104,7 @@ profile_source = nrow(observations.bigiel) > 0 ?
 CSV.write(joinpath(output_directory, "profiles.csv"), DataFrame(
     R_kpc=R_spline,
     Sigma_g_Msun_kpc2=Sigma_g_spline,
-    Sigmadot_star_Msun_yr_kpc2=Sigmadot_star_spline,
+    Sigmadot_star_Msun_Gyr_kpc2=Sigmadot_star_spline,
 ))
 
 CSV.write(joinpath(output_directory, "gas_profiles.csv"), DataFrame(
@@ -131,17 +141,17 @@ sfr_measurement_diagnostics = DataFrame(
     source=observations.sfr_measurements.source,
     row_type=fill("measurement", nrow(observations.sfr_measurements)),
     R_kpc=observations.sfr_measurements.R_kpc,
-    Sigmadot_star_obs_Msun_yr_kpc2=(1-return_fraction) .* observations.sfr_measurements.value,
-    e_Sigmadot_star_obs_Msun_yr_kpc2=(1-return_fraction) .* observations.sfr_measurements.error,
-    Sigmadot_star_spline_Msun_yr_kpc2=(1-return_fraction) .* observations.sfr_spline.v.(observations.sfr_measurements.R_kpc),
+    Sigmadot_star_obs_Msun_Gyr_kpc2=1e9 .* (1-return_fraction) .* observations.sfr_measurements.value,
+    e_Sigmadot_star_obs_Msun_Gyr_kpc2=1e9 .* (1-return_fraction) .* observations.sfr_measurements.error,
+    Sigmadot_star_spline_Msun_Gyr_kpc2=1e9 .* (1-return_fraction) .* observations.sfr_spline.v.(observations.sfr_measurements.R_kpc),
 )
 sfr_dense_diagnostics = DataFrame(
     source=fill(profile_source, spline_point_count),
     row_type=fill("dense", spline_point_count),
     R_kpc=R_spline,
-    Sigmadot_star_obs_Msun_yr_kpc2=fill(missing, spline_point_count),
-    e_Sigmadot_star_obs_Msun_yr_kpc2=fill(missing, spline_point_count),
-    Sigmadot_star_spline_Msun_yr_kpc2=Sigmadot_star_spline,
+    Sigmadot_star_obs_Msun_Gyr_kpc2=fill(missing, spline_point_count),
+    e_Sigmadot_star_obs_Msun_Gyr_kpc2=fill(missing, spline_point_count),
+    Sigmadot_star_spline_Msun_Gyr_kpc2=Sigmadot_star_spline,
 )
 CSV.write(
     joinpath(output_directory, "sfr_spline_diagnostics.csv"),
@@ -204,7 +214,8 @@ CSV.write(joinpath(output_directory, "metadata.csv"), DataFrame(
     return_fraction=[return_fraction],
     stellar_sink=["net_locked_mass"],
     Mdot_nuc_Msun_yr=[Mdot_nuc],
-    nuclear_SFR_origin=["supplied_config"],
+    source_normalization=[source_normalization],
+    nuclear_SFR_origin=[nuclear_SFR_origin],
     R_nucl_kpc=[R_nucl],
     R_in_kpc=[R_in],
     v_c_nucl_kms=[parse(Float64, vc_nucl)],
@@ -236,9 +247,6 @@ CSV.write(joinpath(output_directory, "metadata.csv"), DataFrame(
 CSV.write(joinpath(output_directory, "sparc_corrected.csv"), observations.sparc)
 CSV.write(joinpath(output_directory, "leroy_profiles_used.csv"), observations.radial)
 CSV.write(joinpath(output_directory, "bigiel_profiles_used.csv"), observations.bigiel)
-CSV.write(
-    joinpath(output_directory, "sfr_crosscalibration.csv"),
-    observations.sfr_crosscalibration.diagnostics,
-)
+CSV.write(joinpath(output_directory, "sfr_crosscalibration.csv"), observations.sfr_crosscalibration.diagnostics)
 
 println("Wrote C++ model input CSVs to: $(output_directory)")

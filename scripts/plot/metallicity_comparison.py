@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from color_palette import color_cycle
 
 from hershey_fonts import register_hershey_weight_aliases
 from paper_galaxies import PAPER_GALAXIES, PAPER_GALAXY_SET, galaxy_label
@@ -17,16 +18,12 @@ import smplotlib
 
 
 COMPARISON_FIGURE_SIZE = (3.5, 3.5)
+SOLAR_OXYGEN_ABUNDANCE = 8.69
 
 
-smplotlib.set_style(
-    usetex=False,
-    fontsize=10,
-    figsize=COMPARISON_FIGURE_SIZE,
-    dpi=144,
-)
+smplotlib.set_style(usetex=False, fontsize=10, figsize=COMPARISON_FIGURE_SIZE, dpi=144)
 plt.rcParams.update(
-    {
+    {"axes.prop_cycle": color_cycle(),
         "axes.grid": False,
         "xtick.direction": "out",
         "ytick.direction": "out",
@@ -38,27 +35,13 @@ plt.rcParams.update(
 
 
 CURVE_STYLES = {
-    "forward_sparc_spline": {
-        "color": "black",
-        "linestyle": "-",
-        "marker": "o",
-    },
-    "inverse_dynamics": {
-        "color": "black",
-        "linestyle": "-",
-        "marker": "o",
-    },
+    "forward_sparc_spline": {"color": "black", "linestyle": "-", "marker": "o"},
+    "inverse_dynamics": {"color": "black", "linestyle": "-", "marker": "o"},
 }
 
-PLOTTED_CURVES = {
-    "forward": {"forward_sparc_spline"},
-    "inverse": {"inverse_dynamics"},
-}
+PLOTTED_CURVES = {"forward": {"forward_sparc_spline"}, "inverse": {"inverse_dynamics"}}
 
-FAMILY_TITLES = {
-    "forward": "forward",
-    "inverse": "inverse",
-}
+FAMILY_TITLES = {"forward": "forward", "inverse": "inverse"}
 
 def read_csv(path, required_columns):
     if not path.is_file():
@@ -68,9 +51,7 @@ def read_csv(path, required_columns):
         columns = set(reader.fieldnames or ())
         missing = set(required_columns) - columns
         if missing:
-            raise ValueError(
-                f"{path} is missing required columns: {', '.join(sorted(missing))}"
-            )
+            raise ValueError(f"{path} is missing required columns: {', '.join(sorted(missing))}")
         return list(reader)
 
 
@@ -92,20 +73,13 @@ def sorted_numeric(rows, name):
     return sorted(rows, key=lambda row: number(row, name))
 
 
-def make_plot(
-    galaxy,
-    family,
-    observations,
-    curves,
-    output_root,
-    show_title=True,
-):
+def make_plot(galaxy, family, observations, curves, output_root, show_title=True):
     figure, profile_axis = plt.subplots(figsize=COMPARISON_FIGURE_SIZE)
     profile_axis.set_box_aspect(1)
     if show_title:
         profile_axis.set_title(f"{galaxy_label(galaxy)} - {FAMILY_TITLES[family]}")
     profile_axis.set_xlabel(r"$R\;[\mathrm{kpc}]$")
-    profile_axis.set_ylabel(r"$12+\log_{10}(\mathrm{O/H})$")
+    profile_axis.set_ylabel(r"$Z/Z_\odot$")
 
     curve_values = []
     curve_radii = []
@@ -113,25 +87,30 @@ def make_plot(
         style = CURVE_STYLES[curve_id]
         ordered = sorted_numeric(curve_rows, "R_kpc")
         radius = [number(row, "R_kpc") for row in ordered]
-        model_oh12 = [number(row, "model_OH12") for row in ordered]
+        model_solar = [10.0 ** (number(row, "model_OH12") - SOLAR_OXYGEN_ABUNDANCE) for row in ordered]
         profile_axis.plot(
             radius,
-            model_oh12,
+            model_solar,
             color=style["color"],
             linestyle=style["linestyle"],
             linewidth=2.0 if ordered[0]["curve_role"] == "prediction" else 1.5,
             label="SPARC spline",
         )
         curve_radii.extend(radius)
-        curve_values.extend(model_oh12)
+        curve_values.extend(model_solar)
 
     ordered_observations = sorted_numeric(observations, "R_kpc")
     observation_radius = [number(row, "R_kpc") for row in ordered_observations]
-    observation_oh12 = [number(row, "OH12") for row in ordered_observations]
-    observation_error = [number(row, "e_OH12") for row in ordered_observations]
+    observation_solar = [10.0 ** (number(row, "OH12") - SOLAR_OXYGEN_ABUNDANCE) for row in ordered_observations]
+    lower = [10.0 ** (number(row, "OH12") - number(row, "e_OH12") - SOLAR_OXYGEN_ABUNDANCE)
+             for row in ordered_observations]
+    upper = [10.0 ** (number(row, "OH12") + number(row, "e_OH12") - SOLAR_OXYGEN_ABUNDANCE)
+             for row in ordered_observations]
+    observation_error = [[value - bound for value, bound in zip(observation_solar, lower)],
+                         [bound - value for value, bound in zip(observation_solar, upper)]]
     profile_axis.errorbar(
         observation_radius,
-        observation_oh12,
+        observation_solar,
         yerr=observation_error,
         color="black",
         ecolor="black",
@@ -148,11 +127,7 @@ def make_plot(
     all_radii = observation_radius + curve_radii
     if all_radii:
         profile_axis.set_xlim(0.0, 1.03 * max(all_radii))
-    all_abundances = [
-        bound
-        for value, error in zip(observation_oh12, observation_error)
-        for bound in (value - error, value + error)
-    ] + curve_values
+    all_abundances = lower + upper + curve_values
     if all_abundances:
         abundance_min = min(all_abundances)
         abundance_max = max(all_abundances)
@@ -175,12 +150,7 @@ def main():
         type=Path,
         help="directory containing fit_summary.csv and the plot-ready comparison CSVs",
     )
-    parser.add_argument(
-        "plot_output",
-        nargs="?",
-        type=Path,
-        help="plot directory; defaults to COMPARISON_OUTPUT",
-    )
+    parser.add_argument("plot_output", nargs="?", type=Path, help="plot directory; defaults to COMPARISON_OUTPUT")
     parser.add_argument(
         "--no-title",
         action="store_true",
@@ -196,25 +166,11 @@ def main():
     )
     curves = read_csv(
         comparison_output / "model_curves.csv",
-        {
-            "galaxy",
-            "model_family",
-            "model_curve",
-            "curve_role",
-            "label",
-            "R_kpc",
-            "model_OH12",
-        },
+        {"galaxy", "model_family", "model_curve", "curve_role", "label", "R_kpc", "model_OH12"},
     )
     summary = read_csv(
         comparison_output / "fit_summary.csv",
-        {
-            "galaxy",
-            "calibration",
-            "model_family",
-            "model_curve",
-            "fit_status",
-        },
+        {"galaxy", "calibration", "model_family", "model_curve", "fit_status"},
     )
 
     kk04_observations = [row for row in observations if row["calibration"] == "KK04"]
@@ -223,9 +179,7 @@ def main():
     curve_groups = group_rows(curves, ("galaxy", "model_family", "model_curve"))
     summary_groups = group_rows(kk04_summary, ("galaxy", "model_family"))
 
-    galaxies = [
-        galaxy for galaxy in PAPER_GALAXIES if (galaxy,) in observation_groups
-    ]
+    galaxies = [galaxy for galaxy in PAPER_GALAXIES if (galaxy,) in observation_groups]
     for galaxy in galaxies:
         for family in ("forward", "inverse"):
             family_curves = {
@@ -242,9 +196,7 @@ def main():
             ]
             if not family_summary:
                 raise ValueError(f"Incomplete comparison plot data for {galaxy}/{family}")
-            if not family_curves and not any(
-                "stagnation" in row["fit_status"] for row in family_summary
-            ):
+            if not family_curves and not any("stagnation" in row["fit_status"] for row in family_summary):
                 raise ValueError(f"Missing SPARC-spline curve for {galaxy}/{family}")
             make_plot(
                 galaxy,

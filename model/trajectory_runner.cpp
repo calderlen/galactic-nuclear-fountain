@@ -1,5 +1,6 @@
 #include "csv.h"
 #include "orbits.h"
+#include "cgm_io.h"
 
 #include <algorithm>
 #include <charconv>
@@ -208,15 +209,17 @@ std::vector<LaunchRecord> read_launches(const std::filesystem::path& path,
 }
 
 int main(int argc, char* argv[]) {
-    const bool help = argc >= 2 && std::string(argv[1]) == "--help";
-    if (argc < 6 || help) {
-        std::cout << "Usage: " << argv[0]
-                  << " CONFIG.csv ORBITS.csv[.gz] OUTPUT.csv SAMPLE_DT_Myr PARCEL_ID [PARCEL_ID ...]\n"
-                  << "Re-integrates selected saved launches and samples t,R,z,vR,vz,vphi,j_z,m.\n"
-                  << "The configuration may be a current config.csv or an older parameters.csv.\n";
-        return help ? 0 : 1;
-    }
     try {
+        const auto cgm_config=cgm_config_argument(argc,argv);
+        const bool help = argc >= 2 && std::string(argv[1]) == "--help";
+        if (argc < 6 || help) {
+            std::cout << "Usage: " << argv[0]
+                      << " CONFIG.csv ORBITS.csv[.gz] OUTPUT.csv SAMPLE_DT_Myr PARCEL_ID [PARCEL_ID ...]\n"
+                      << "Re-integrates selected saved launches and samples t,R,z,vR,vz,vphi,j_z,m.\n"
+                      << "The configuration may be a current config.csv or an older parameters.csv.\n"
+                      << "An optional --cgm-config CONFIG.csv overrides its CGM prescription.\n";
+            return help ? 0 : 1;
+        }
         const std::filesystem::path config_path = argv[1];
         const std::filesystem::path catalog_path = argv[2];
         const std::filesystem::path output_path = argv[3];
@@ -233,7 +236,7 @@ int main(int argc, char* argv[]) {
         }
 
         const auto settings = read_settings(config_path);
-        const OrbitParameters potential{
+        OrbitParameters potential{
             .M_d = setting(settings, "M_d_Msun"),
             .a_d = setting(settings, "a_d_kpc"),
             .b_d = setting(settings, "b_d_kpc"),
@@ -247,6 +250,8 @@ int main(int argc, char* argv[]) {
             .epsilon = optional_setting(settings, "epsilon", 0.0),
             .beta = optional_setting(settings, "beta", 0.0)
         };
+        const auto cgm_solution=load_cgm(settings,cgm_config,&potential);
+        if (cgm_solution) potential.cgm=&*cgm_solution;
         const double m0 = optional_setting(settings, "parcel_m0_Msun", 1.0);
         const double h_0 = setting(settings, "h_0_Myr");
         const double h_max = setting(settings, "h_max_Myr");

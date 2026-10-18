@@ -24,10 +24,7 @@ def register_hershey_weight_aliases():
     for font_path in (package_directory / "ttf").glob("*.ttf"):
         font_manager.fontManager.addfont(font_path)
 
-    registered = {
-        (entry.fname, entry.style, entry.weight)
-        for entry in font_manager.fontManager.ttflist
-    }
+    registered = {(entry.fname, entry.style, entry.weight) for entry in font_manager.fontManager.ttflist}
     for entry in list(font_manager.fontManager.ttflist):
         if not entry.name.startswith("AVHershey"):
             continue
@@ -37,7 +34,5 @@ def register_hershey_weight_aliases():
         if alias_weight is None or alias in registered:
             continue
 
-        font_manager.fontManager.ttflist.append(
-            replace(entry, weight=alias_weight)
-        )
+        font_manager.fontManager.ttflist.append(replace(entry, weight=alias_weight))
         registered.add(alias)

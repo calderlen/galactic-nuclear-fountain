@@ -45,18 +45,12 @@ void build_kernel(const std::vector<LandingPoint>& landings,
 
     double total_weight = 0.0;
     for (const LandingPoint& landing : landings) {
-        if (!std::isfinite(landing.weight) || landing.weight < 0.0) {
-            throw std::invalid_argument("Launch weights must be finite and nonnegative");
-        }
         total_weight += landing.weight;
         if (!landing.returned) {
             continue;
         }
-        if (!std::isfinite(landing.R_land) || landing.R_land < 0.0 ||
-            !std::isfinite(landing.tau) || landing.tau < 0.0 ||
-            !std::isfinite(landing.mass_ratio) ||
-            !std::isfinite(landing.j_land)) {
-            throw std::invalid_argument("Returned parcels need finite, nonnegative radius and delay");
+        if (!std::isfinite(landing.mass_ratio)) {
+            throw std::invalid_argument("Returned parcels need finite mass ratios");
         }
         const std::size_t i = bin_index(landing.R_land, R_bins);
         const std::size_t j = bin_index(landing.tau, tau_bins);
@@ -67,10 +61,6 @@ void build_kernel(const std::vector<LandingPoint>& landings,
             K_j[cell] += landing.weight * landing.mass_ratio * landing.j_land;
         }
     }
-    if (!std::isfinite(total_weight) || total_weight <= 0.0) {
-        throw std::invalid_argument("Total launched weight must be finite and positive");
-    }
-
     for (std::size_t i = 0; i < n_R; ++i) {
         for (std::size_t j = 0; j < n_tau; ++j) {
             const double area = std::numbers::pi * (R_bins[i+1]-R_bins[i]) * (R_bins[i+1]+R_bins[i]);
@@ -91,19 +81,13 @@ DoubleVec convolve_kernel(const DoubleVec& kernel,
                               double t_Myr, const std::function<double(double)>& Mdot_launch) {
     const std::size_t n_R = R_bins.size() - 1;
     const std::size_t n_tau = tau_bins.size() - 1;
-    if (!std::isfinite(t_Myr)) {
-        throw std::invalid_argument("Landing time must be finite");
-    }
     DoubleVec launch_rates(n_tau);
     for (std::size_t j = 0; j < n_tau; ++j) {
         const double tau_mid = tau_bins[j] + 0.5 * (tau_bins[j + 1] - tau_bins[j]);
         const double launch_time = t_Myr - tau_mid;
-        if (!std::isfinite(launch_time)) {
-            throw std::invalid_argument("Retarded launch time must be finite");
-        }
         launch_rates[j] = Mdot_launch(launch_time);
-        if (!std::isfinite(launch_rates[j]) || launch_rates[j] < 0.0) {
-            throw std::invalid_argument("Launch history must return finite nonnegative mass rates");
+        if (!std::isfinite(launch_rates[j])) {
+            throw std::invalid_argument("Launch history must return finite mass rates");
         }
     }
 

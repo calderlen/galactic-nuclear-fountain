@@ -18,9 +18,6 @@ LaunchDistribution make_launch_distribution(const LaunchDistributionParameters& 
     constexpr int intervals = 4096;
     const double lower = std::max(0.0, p.R_ring_kpc - 8.0 * p.sigma_R_kpc);
     const double upper = p.R_ring_kpc + 8.0 * p.sigma_R_kpc;
-    if (!std::isfinite(upper) || upper <= lower) {
-        throw std::invalid_argument("Radial distribution has an unresolvable width");
-    }
     double previous_pdf = 0.0;
     double integral = 0.0;
     for (int i = 0; i <= intervals; ++i) {
@@ -28,9 +25,6 @@ LaunchDistribution make_launch_distribution(const LaunchDistributionParameters& 
         const double x = (radius - p.R_ring_kpc) / p.sigma_R_kpc;
         const double pdf = radius * std::exp(-0.5 * x * x);
         if (i > 0) {
-            if (radius <= distribution.radius_grid.back()) {
-                throw std::invalid_argument("Radial CDF grid is not resolved in floating point");
-            }
             integral += 0.5 * (previous_pdf + pdf) * (radius - distribution.radius_grid.back());
         }
         distribution.radius_grid.push_back(radius);

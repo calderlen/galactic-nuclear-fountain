@@ -1,3 +1,4 @@
+from axis_labels import quantity_unit_label
 #!/usr/bin/env python3
 
 import argparse
@@ -7,9 +8,11 @@ from itertools import groupby
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from color_palette import color_cycle
 from matplotlib.lines import Line2D
 
 from hershey_fonts import register_hershey_weight_aliases
+from surface_rate_units import canonical_column, canonical_rate_row, YEARS_PER_GYR
 from paper_galaxies import galaxy_label, require_paper_galaxy
 
 
@@ -20,18 +23,15 @@ import smplotlib
 MODEL_FIGURE_SIZE = (3.5, 3.5)
 FIDUCIAL_PLOT_R_MAX_KPC = 20.0
 OBSERVATIONAL_SOURCE = "SPARC_spline"
-SURFACE_RATE_PLOT_SCALE = 1e3  # Msun/yr/kpc^2 -> Msun/Gyr/pc^2
-SURFACE_RATE_LABEL = r"$\dot{\Sigma}\;[M_\odot\,\mathrm{Gyr}^{-1}\,\mathrm{pc}^{-2}]$"
+SURFACE_RATE_PLOT_SCALE = 1.0  # Retain native Msun/Gyr/kpc^2 units.
+SURFACE_RATE_LABEL = r"$\dot{\Sigma}\;[M_\odot\,\mathrm{Gyr}^{-1}\,\mathrm{kpc}^{-2}]$"
+SOLAR_METALLICITY = 0.0139  # Match observations/comparison.cpp.
+METALLICITY_LABEL = r"$Z/Z_\odot$"
 
 
-smplotlib.set_style(
-    usetex=False,
-    fontsize=11,
-    figsize=MODEL_FIGURE_SIZE,
-    dpi=144,
-)
+smplotlib.set_style(usetex=False, fontsize=11, figsize=MODEL_FIGURE_SIZE, dpi=144)
 plt.rcParams.update(
-    {
+    {"axes.prop_cycle": color_cycle(),
         "axes.grid": False,
         "xtick.direction": "out",
         "ytick.direction": "out",
@@ -57,15 +57,13 @@ TEXT_COLUMNS = {
     "profile_sources",
     "stellar_sink",
     "nuclear_SFR_origin",
+    "rotation_domain_truncated",
+    "launch_velocity_origin",
 }
 
-SOURCE_COLORS = {
-    "SPARC_spline": "black",
-}
+SOURCE_COLORS = {"SPARC_spline": "black"}
 
-SOURCE_LABELS = {
-    "SPARC_spline": "SPARC spline",
-}
+SOURCE_LABELS = {"SPARC_spline": "SPARC spline"}
 
 LEGEND_STYLE = {
     "fontsize": 9.0,
@@ -117,15 +115,14 @@ def read_rows(path, required_columns=()):
 
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream)
-        fieldnames = set(reader.fieldnames or ())
+        fieldnames = {canonical_column(name)[0] for name in (reader.fieldnames or ())}
         missing = set(required_columns) - fieldnames
         if missing:
-            raise ValueError(
-                f"{path} is missing required columns: {', '.join(sorted(missing))}"
-            )
+            raise ValueError(f"{path} is missing required columns: {', '.join(sorted(missing))}")
 
         rows = []
         for raw_row in reader:
+            raw_row = canonical_rate_row(raw_row)
             row = {}
             for name, value in raw_row.items():
                 row[name] = value if name in TEXT_COLUMNS else parse_number(value)
@@ -151,10 +148,7 @@ def read_summary(path):
 
 
 def read_rotations(path):
-    return read_rows(
-        path,
-        {"source", "kind", "Vflat_kms", "lflat_kpc", "chi2", "dof", "reduced_chi2"},
-    )
+    return read_rows(path, {"source", "kind", "Vflat_kms", "lflat_kpc", "chi2", "dof", "reduced_chi2"})
 
 
 def read_metadata(path):
@@ -165,10 +159,7 @@ def read_metadata(path):
 
 
 def read_sparc(path):
-    return read_rows(
-        path,
-        {"R_adopted_kpc", "Vobs_adopted_kms", "e_Vobs_adopted_kms"},
-    )
+    return read_rows(path, {"R_adopted_kpc", "Vobs_adopted_kms", "e_Vobs_adopted_kms"})
 
 
 def read_sfr_diagnostics(path):
@@ -180,8 +171,9 @@ def read_sfr_diagnostics(path):
             "source",
             "row_type",
             "R_kpc",
-            "Sigmadot_star_obs_Msun_yr_kpc2",
-            "e_Sigmadot_star_obs_Msun_yr_kpc2",
+            "Sigmadot_star_obs_Msun_Gyr_kpc2",
+            "e_Sigmadot_star_obs_Msun_Gyr_kpc2",
+            "Sigmadot_star_spline_Msun_Gyr_kpc2",
         },
     )
 
@@ -200,19 +192,10 @@ def load_model_run(output_directory):
 
     if profile_types.pop() == "tabulated":
         if OBSERVATIONAL_SOURCE not in profiles:
-            raise ValueError(
-                f"{output_directory / 'profiles.csv'} has no "
-                f"{OBSERVATIONAL_SOURCE} rows"
-            )
+            raise ValueError(f"{output_directory / 'profiles.csv'} has no " f"{OBSERVATIONAL_SOURCE} rows")
         profiles = {OBSERVATIONAL_SOURCE: profiles[OBSERVATIONAL_SOURCE]}
-        summary = [
-            row for row in summary if row["source"] == OBSERVATIONAL_SOURCE
-        ]
-        rotations = [
-            rotation
-            for rotation in rotations
-            if rotation["source"] == OBSERVATIONAL_SOURCE
-        ]
+        summary = [row for row in summary if row["source"] == OBSERVATIONAL_SOURCE]
+        rotations = [rotation for rotation in rotations if rotation["source"] == OBSERVATIONAL_SOURCE]
         if len(rotations) != 1:
             raise ValueError(
                 f"Expected one {OBSERVATIONAL_SOURCE} rotation in "
@@ -220,9 +203,7 @@ def load_model_run(output_directory):
             )
         metadata = read_metadata(output_directory / "metadata.csv")
         sparc = read_sparc(output_directory / "sparc_corrected.csv")
-        sfr_diagnostics = read_sfr_diagnostics(
-            output_directory / "sfr_spline_diagnostics.csv"
-        )
+        sfr_diagnostics = read_sfr_diagnostics(output_directory / "sfr_spline_diagnostics.csv")
     else:
         metadata = None
         sparc = None
@@ -261,12 +242,7 @@ def source_style(source, index=0, mode="color"):
 
 def finite_xy(rows, x_name, y_name, positive=False):
     points = [
-        (
-            row[x_name],
-            row[y_name]
-            if math.isfinite(row[y_name]) and (not positive or row[y_name] > 0)
-            else math.nan,
-        )
+        (row[x_name], row[y_name] if math.isfinite(row[y_name]) and (not positive or row[y_name] > 0) else math.nan)
         for row in rows
         if math.isfinite(row[x_name])
     ]
@@ -274,12 +250,7 @@ def finite_xy(rows, x_name, y_name, positive=False):
 
 
 def finite_values(profiles, column):
-    return [
-        row[column]
-        for rows in profiles.values()
-        for row in rows
-        if math.isfinite(row[column])
-    ]
+    return [row[column] for rows in profiles.values() for row in rows if math.isfinite(row[column])]
 
 
 def least_data_legend_position(axis, plotted_points):
@@ -321,13 +292,8 @@ def least_data_legend_position(axis, plotted_points):
     for location, (xmin, xmax, ymin, ymax) in candidates.items():
         center_x = 0.5 * (xmin + xmax)
         center_y = 0.5 * (ymin + ymax)
-        overlap = sum(
-            xmin <= x <= xmax and ymin <= y <= ymax for x, y in points
-        )
-        proximity = sum(
-            max(0.0, 0.35 - math.hypot(x - center_x, y - center_y))
-            for x, y in points
-        )
+        overlap = sum(xmin <= x <= xmax and ymin <= y <= ymax for x, y in points)
+        proximity = sum(max(0.0, 0.35 - math.hypot(x - center_x, y - center_y)) for x, y in points)
         score = 1000.0 * overlap + proximity
         if score < best_score:
             best_location = location
@@ -335,19 +301,10 @@ def least_data_legend_position(axis, plotted_points):
     return best_location
 
 
-def finish_figure(
-    figure,
-    axis,
-    path,
-    ylabel,
-    plotted_points,
-    log_y=False,
-    legend=True,
-    title=None,
-):
+def finish_figure(figure, axis, path, ylabel, plotted_points, log_y=False, legend=True, title=None):
     axis.set_box_aspect(1)
     axis.set_xlabel(r"$R\;[\mathrm{kpc}]$")
-    axis.set_ylabel(ylabel)
+    axis.set_ylabel(quantity_unit_label(ylabel))
     if log_y:
         axis.set_yscale("log")
     if title:
@@ -355,36 +312,18 @@ def finish_figure(
     if legend:
         handles, labels = axis.get_legend_handles_labels()
         if handles:
-            axis.legend(
-                handles,
-                labels,
-                loc=least_data_legend_position(axis, plotted_points),
-                **LEGEND_STYLE,
-            )
+            axis.legend(handles, labels, loc=least_data_legend_position(axis, plotted_points), **LEGEND_STYLE)
+
     figure.tight_layout()
     figure.savefig(path)
     plt.close(figure)
 
 
-def add_reference(
-    axis,
-    plotted_points,
-    value,
-    label=None,
-    color="0.45",
-    style=":",
-    linewidth=0.9,
-):
+def add_reference(axis, plotted_points, value, label=None, color="0.45", style=":", linewidth=0.9):
     if value is None or not math.isfinite(value):
         return
     x_limits = axis.get_xlim()
-    axis.axhline(
-        value,
-        color=color,
-        linestyle=style,
-        linewidth=linewidth,
-        label=label,
-    )
+    axis.axhline(value, color=color, linestyle=style, linewidth=linewidth, label=label)
     plotted_points.append(([x_limits[0], x_limits[1]], [value, value]))
 
 
@@ -418,23 +357,11 @@ def plot_profile_column(
         if not radius:
             continue
         style = source_style(source, index, style_mode)
-        axis.plot(
-            radius,
-            values,
-            label=source_only_label(profiles, source),
-            **style,
-        )
+        axis.plot(radius, values, label=source_only_label(profiles, source), **style)
         plotted_points.append((radius, values))
     for reference in references:
         add_reference(axis, plotted_points, **reference)
-    finish_figure(
-        figure,
-        axis,
-        output_directory / filename,
-        ylabel,
-        plotted_points,
-        log_y=log_y,
-    )
+    finish_figure(figure, axis, output_directory / filename, ylabel, plotted_points, log_y=log_y)
 
 
 def rotation_velocity(rotation, radius):
@@ -442,27 +369,17 @@ def rotation_velocity(rotation, radius):
         return rotation["Vflat_kms"]
     if rotation["kind"] == "tabulated":
         raise ValueError("Tabulated rotation curves must be read from profiles.csv")
-    raise ValueError(
-        f"Unknown rotation type {rotation['kind']!r} for {rotation['source']}"
-    )
+    raise ValueError(f"Unknown rotation type {rotation['kind']!r} for {rotation['source']}")
 
 
-def plot_rotation_curves(
-    profiles, rotations, sparc, metadata, output_directory, show_title=True
-):
+def plot_rotation_curves(profiles, rotations, sparc, metadata, output_directory, show_title=True):
     figure, axis = plt.subplots()
     plotted_points = []
-    maximum_radius = max(
-        row["R_kpc"] for rows in profiles.values() for row in rows
-    )
+    maximum_radius = max(row["R_kpc"] for rows in profiles.values() for row in rows)
 
     if sparc is not None:
         sparc_points = [
-            (
-                row["R_adopted_kpc"],
-                row["Vobs_adopted_kms"],
-                row["e_Vobs_adopted_kms"],
-            )
+            (row["R_adopted_kpc"], row["Vobs_adopted_kms"], row["e_Vobs_adopted_kms"])
             for row in sparc
             if math.isfinite(row["R_adopted_kpc"])
             and math.isfinite(row["Vobs_adopted_kms"])
@@ -488,23 +405,15 @@ def plot_rotation_curves(
             zorder=2,
         )
         plotted_points.append((sparc_radius, sparc_velocity))
-        plotted_points.append(
-            (sparc_radius, [value - error for value, error in zip(sparc_velocity, errors)])
-        )
-        plotted_points.append(
-            (sparc_radius, [value + error for value, error in zip(sparc_velocity, errors)])
-        )
+        plotted_points.append((sparc_radius, [value - error for value, error in zip(sparc_velocity, errors)]))
+        plotted_points.append((sparc_radius, [value + error for value, error in zip(sparc_velocity, errors)]))
 
     for index, rotation in enumerate(rotations):
         if rotation["kind"] == "tabulated":
-            curve_radius, velocities = finite_xy(
-                profiles[rotation["source"]], "R_kpc", "v_c_kms"
-            )
+            curve_radius, velocities = finite_xy(profiles[rotation["source"]], "R_kpc", "v_c_kms")
         else:
             curve_radius = [maximum_radius * point / 499.0 for point in range(500)]
-            velocities = [
-                rotation_velocity(rotation, radius) for radius in curve_radius
-            ]
+            velocities = [rotation_velocity(rotation, radius) for radius in curve_radius]
         style = source_style(rotation["source"], index, "black")
         axis.plot(
             curve_radius,
@@ -519,11 +428,7 @@ def plot_rotation_curves(
         )
         plotted_points.append((curve_radius, velocities))
 
-    title = (
-        galaxy_label(metadata["galaxy"])
-        if show_title and metadata is not None
-        else None
-    )
+    title = (galaxy_label(metadata["galaxy"]) if show_title and metadata is not None else None)
     finish_figure(
         figure,
         axis,
@@ -535,100 +440,37 @@ def plot_rotation_curves(
     )
 
 
-def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
+def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None, *, title=None):
     figure, axis = plt.subplots()
     plotted_points = []
-    values = finite_values(profiles, "Sigmadot_star_Msun_yr_kpc2")
-    values += finite_values(profiles, "Sigmadot_land_Msun_yr_kpc2")
+    values = finite_values(profiles, "Sigmadot_star_Msun_Gyr_kpc2")
+    values += finite_values(profiles, "Sigmadot_land_Msun_Gyr_kpc2")
     if sfr_diagnostics is not None:
         values += [
-            row["Sigmadot_star_obs_Msun_yr_kpc2"]
+            row["Sigmadot_star_spline_Msun_Gyr_kpc2"]
             for row in sfr_diagnostics
-            if row["row_type"] == "measurement"
-            and math.isfinite(row["Sigmadot_star_obs_Msun_yr_kpc2"])
+            if row["row_type"] == "dense"
+            and math.isfinite(row["Sigmadot_star_spline_Msun_Gyr_kpc2"])
         ]
     log_y = bool(values) and all(value > 0 for value in values)
 
     if sfr_diagnostics is not None:
-        measurement_styles = {
-            "Leroy2008": {
-                "label": "Leroy et al. (2008)",
-                "markerfacecolor": "black",
-            },
-            "Bigiel2010_crosscal": {
-                "label": "Bigiel et al. (2010)",
-                "markerfacecolor": "none",
-            },
-        }
-        for source, marker_style in measurement_styles.items():
-            points = [
-                (
-                    row["R_kpc"],
-                    row["Sigmadot_star_obs_Msun_yr_kpc2"] * SURFACE_RATE_PLOT_SCALE,
-                    row["e_Sigmadot_star_obs_Msun_yr_kpc2"] * SURFACE_RATE_PLOT_SCALE,
-                )
-                for row in sfr_diagnostics
-                if row["row_type"] == "measurement"
-                and row["source"] == source
-                and math.isfinite(row["R_kpc"])
-                and math.isfinite(row["Sigmadot_star_obs_Msun_yr_kpc2"])
-                and math.isfinite(row["e_Sigmadot_star_obs_Msun_yr_kpc2"])
-                and (
-                    not log_y
-                    or row["Sigmadot_star_obs_Msun_yr_kpc2"] > 0
-                )
-            ]
-            if not points:
-                continue
-            radius = [point[0] for point in points]
-            star_observed = [point[1] for point in points]
-            errors = [point[2] for point in points]
-            axis.errorbar(
-                radius,
-                star_observed,
-                yerr=errors,
-                fmt="o",
-                markersize=3.0,
-                markerfacecolor=marker_style["markerfacecolor"],
-                markeredgecolor="black",
-                markeredgewidth=0.7,
-                color="black",
-                ecolor="0.45",
-                elinewidth=0.6,
-                capsize=1.2,
-                label=marker_style["label"],
-                zorder=2,
-            )
-            plotted_points.append((radius, star_observed))
+        from observed_disk_comparison import plot_sfr_diagnostic_fit
+        _,radius,star_observed=plot_sfr_diagnostic_fit(axis,sfr_diagnostics,SURFACE_RATE_PLOT_SCALE)
+        plotted_points.append((radius,star_observed))
 
     first_rows = next(iter(profiles.values()))
-    radius, star = finite_xy(
-        first_rows, "R_kpc", "Sigmadot_star_Msun_yr_kpc2", positive=log_y
-    )
+    radius, star = finite_xy(first_rows, "R_kpc", "Sigmadot_star_Msun_Gyr_kpc2", positive=log_y)
     star = [value * SURFACE_RATE_PLOT_SCALE for value in star]
-    axis.plot(
-        radius,
-        star,
-        color="black",
-        linestyle="-",
-        label=r"$\dot{\Sigma}_\star$",
-        zorder=3,
-    )
+    axis.plot(radius, star, color="black", linestyle="-", label=r"$\dot{\Sigma}_\star$", zorder=3)
     plotted_points.append((radius, star))
 
     for index, (source, rows) in enumerate(profiles.items()):
-        radius, landing = finite_xy(
-            rows, "R_kpc", "Sigmadot_land_Msun_yr_kpc2", positive=log_y
-        )
+        radius, landing = finite_xy(rows, "R_kpc", "Sigmadot_land_Msun_Gyr_kpc2", positive=log_y)
         landing = [value * SURFACE_RATE_PLOT_SCALE for value in landing]
         style = source_style(source, index, "color_dashed")
         style["color"] = "red"
-        axis.plot(
-            radius,
-            landing,
-            label=r"$\dot{\Sigma}_{\rm land}$" + source_suffix(profiles, source),
-            **style,
-        )
+        axis.plot(radius, landing, label=r"$\dot{\Sigma}_{\rm land}$" + source_suffix(profiles, source), **style)
         plotted_points.append((radius, landing))
 
     add_reference(axis, plotted_points, 0.0 if not log_y else None)
@@ -639,16 +481,13 @@ def plot_surface_rates(profiles, output_directory, sfr_diagnostics=None):
         SURFACE_RATE_LABEL,
         plotted_points,
         log_y=log_y,
+        title=title,
     )
 
 
 def plot_cumulative_landing(profiles, summary, output_directory):
     evolving = any(row["profile_type"] == "evolving" for row in summary)
-    targets = {
-        row["Mdot_land_Msun_yr"]
-        for row in summary
-        if math.isfinite(row["Mdot_land_Msun_yr"])
-    }
+    targets = {row["Mdot_land_Msun_yr"] for row in summary if math.isfinite(row["Mdot_land_Msun_yr"])}
     references = []
     for target in sorted(targets):
         references.append(
@@ -673,37 +512,17 @@ def plot_timescales(profiles, output_directory):
     figure, axis = plt.subplots()
     plotted_points = []
     first_rows = next(iter(profiles.values()))
-    radius, depletion = finite_xy(
-        first_rows, "R_kpc", "t_depletion_Gyr", positive=True
-    )
-    axis.plot(
-        radius,
-        depletion,
-        color="black",
-        linestyle="--",
-        label=r"$t_{\rm depletion}$",
-    )
+    radius, depletion = finite_xy(first_rows, "R_kpc", "t_depletion_Gyr", positive=True)
+    axis.plot(radius, depletion, color="black", linestyle="--", label=r"$t_{\rm depletion}$")
     plotted_points.append((radius, depletion))
 
     for index, (source, rows) in enumerate(profiles.items()):
         radius, inflow = finite_xy(rows, "R_kpc", "t_inflow_Gyr", positive=True)
         style = source_style(source, index, "color")
-        axis.plot(
-            radius,
-            inflow,
-            label=r"$t_{\rm inflow}$" + source_suffix(profiles, source),
-            **style,
-        )
+        axis.plot(radius, inflow, label=r"$t_{\rm inflow}$" + source_suffix(profiles, source), **style)
         plotted_points.append((radius, inflow))
 
-    finish_figure(
-        figure,
-        axis,
-        output_directory / "t.pdf",
-        r"$t\;[\mathrm{Gyr}]$",
-        plotted_points,
-        log_y=True,
-    )
+    finish_figure(figure, axis, output_directory / "t.pdf", r"$t\;[\mathrm{Gyr}]$", plotted_points, log_y=True)
 
 
 def plot_angular_momentum(profiles, rotations, summary, output_directory):
@@ -750,25 +569,34 @@ def plot_angular_momentum(profiles, rotations, summary, output_directory):
     if rows[0]["model"] in {"forward", "inverse"}:
         mu = next(row["mu"] for row in summary if row["source"] == profile_source)
         mixed = [(j_nuc + mu*value)/((1+mu)*j_nuc) for value in cgm]
-        axis.plot(radius, mixed, color="tab:green", linestyle="--", label=r"$j_{\rm land,mix}/j_{\rm nuc}$")
+        axis.plot(radius, mixed, color="tab:green", linestyle="--", label=r"$j_{\rm mix}/j_{\rm nuc}$")
         plotted_points.append((radius, mixed))
 
     cgm = [value / j_nuc for value in cgm]
-    axis.plot(
-        radius,
-        cgm,
-        color="tab:red",
-        linestyle="-",
-        label=r"$j_{\rm CGM}(R)/j_{\rm nuc}$",
-    )
+    axis.plot(radius, cgm, color="tab:red", linestyle="-", label=r"$j_{\rm CGM}(R)/j_{\rm nuc}$")
     plotted_points.append((radius, cgm))
 
-    finish_figure(
-        figure,
-        axis,
-        output_path,
-        r"$j/j_{\rm nuc}$",
-        plotted_points,
+    finish_figure(figure, axis, output_path, r"$j/j_{\rm nuc}$", plotted_points)
+
+
+def plot_cgm_angular_momentum_ratio(profiles, output_directory):
+    ratios = {}
+    for source, rows in profiles.items():
+        ratios[source] = []
+        for row in rows:
+            disk = row["j_disk_kpc_kms"]
+            radius = row.get("R_j_kpc", math.nan)
+            ratios[source].append({
+                "R_kpc": radius if math.isfinite(radius) else row["R_kpc"],
+                "j_CGM_over_j_disk": row["j_CGM_kpc_kms"] / disk
+                if math.isfinite(disk) and disk != 0.0 else math.nan,
+            })
+    plot_profile_column(
+        ratios,
+        output_directory,
+        "j_CGM_over_j_disk.pdf",
+        "j_CGM_over_j_disk",
+        r"$j_{\rm CGM}(R)/j_{\rm disk}(R)$",
     )
 
 
@@ -779,6 +607,7 @@ def plot_metallicity(profiles, summary, output_directory):
     for index, (source, rows) in enumerate(profiles.items()):
         label_suffix = source_suffix(profiles, source)
         radius, metallicity = finite_xy(rows, "R_kpc", "Z")
+        metallicity = [value / SOLAR_METALLICITY for value in metallicity]
         axis.plot(
             radius,
             metallicity,
@@ -790,6 +619,7 @@ def plot_metallicity(profiles, summary, output_directory):
         plotted_points.append((radius, metallicity))
 
         radius, required = finite_xy(rows, "R_kpc", "Z_land_required")
+        required = [value / SOLAR_METALLICITY for value in required]
         axis.plot(
             radius,
             required,
@@ -800,46 +630,34 @@ def plot_metallicity(profiles, summary, output_directory):
         )
         plotted_points.append((radius, required))
 
-    for value in sorted(
-        {row["Z_nucl"] for row in summary if math.isfinite(row["Z_nucl"])}
-    ):
+    for value in sorted({row["Z_nucl"] for row in summary if math.isfinite(row["Z_nucl"])}):
         add_reference(
             axis,
             plotted_points,
-            value,
+            value / SOLAR_METALLICITY,
             label=r"$Z_{\rm nuc}$",
             color="blue",
             style="--",
             linewidth=line_width,
         )
-    for value in sorted(
-        {row["Z_CGM"] for row in summary if math.isfinite(row["Z_CGM"])}
-    ):
+    for value in sorted({row["Z_CGM"] for row in summary if math.isfinite(row["Z_CGM"])}):
         add_reference(
             axis,
             plotted_points,
-            value,
+            value / SOLAR_METALLICITY,
             label=r"$Z_{\rm CGM}$",
             color="green",
             style="--",
             linewidth=line_width,
         )
 
-    finish_figure(
-        figure,
-        axis,
-        output_directory / "Z.pdf",
-        r"$Z$",
-        plotted_points,
-    )
+    finish_figure(figure, axis, output_directory / "Z.pdf", METALLICITY_LABEL, plotted_points)
 
 
 def plot_mu(profiles, summary, output_directory):
     figure, axis = plt.subplots()
     plotted_points = []
-    input_values = {
-        row["mu"] for row in summary if math.isfinite(row["mu"])
-    }
+    input_values = {row["mu"] for row in summary if math.isfinite(row["mu"])}
     for index, (source, rows) in enumerate(profiles.items()):
         style = source_style(source, index, "color")
         angular_radius = "R_j_kpc" if math.isfinite(rows[0].get("R_j_kpc", math.nan)) else "R_kpc"
@@ -854,63 +672,25 @@ def plot_mu(profiles, summary, output_directory):
         plotted_points.append((radius, mu_j))
 
         radius, mu_z = finite_xy(rows, "R_kpc", "mu_Z")
-        axis.plot(
-            radius,
-            mu_z,
-            color=style["color"],
-            linestyle=":",
-            label=r"$\mu_Z$" + source_suffix(profiles, source),
-        )
+        axis.plot(radius, mu_z, color=style["color"], linestyle=":", label=r"$\mu_Z$" + source_suffix(profiles, source))
         plotted_points.append((radius, mu_z))
 
     for value in sorted(input_values):
-        add_reference(
-            axis,
-            plotted_points,
-            value,
-            label=rf"input $\mu={value:g}$",
-            color="0.35",
-            style="-.",
-        )
-    plotted_values = [
-        value
-        for _, values in plotted_points
-        for value in values
-    ]
+        add_reference(axis, plotted_points, value, label=rf"input $\mu={value:g}$", color="0.35", style="-.")
+    plotted_values = [value for _, values in plotted_points for value in values]
     pad_nearly_constant_y_axis(axis, plotted_values)
-    finish_figure(
-        figure,
-        axis,
-        output_directory / "mu.pdf",
-        r"$\mu$",
-        plotted_points,
-    )
+    finish_figure(figure, axis, output_directory / "mu.pdf", r"$\mu$", plotted_points)
 
 
 def render_model_run(model_output, output_directory, show_title=True):
-    profiles, summary, rotations, metadata, sparc, sfr_diagnostics = load_model_run(
-        model_output
-    )
+    profiles, summary, rotations, metadata, sparc, sfr_diagnostics = load_model_run(model_output)
     if metadata is not None:
         require_paper_galaxy(metadata["galaxy"])
 
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    plot_rotation_curves(
-        profiles,
-        rotations,
-        sparc,
-        metadata,
-        output_directory,
-        show_title=show_title,
-    )
-    plot_profile_column(
-        profiles,
-        output_directory,
-        "v_R.pdf",
-        "v_R_kms",
-        r"$v_R\;[\mathrm{km\,s^{-1}}]$",
-    )
+    plot_rotation_curves(profiles, rotations, sparc, metadata, output_directory, show_title=show_title)
+    plot_profile_column(profiles, output_directory, "v_R.pdf", "v_R_kms", r"$v_R\;[\mathrm{km\,s^{-1}}]$")
     plot_surface_rates(profiles, output_directory, sfr_diagnostics)
     plot_cumulative_landing(profiles, summary, output_directory)
     plot_profile_column(
@@ -922,6 +702,7 @@ def render_model_run(model_output, output_directory, show_title=True):
     )
     plot_timescales(profiles, output_directory)
     plot_angular_momentum(profiles, rotations, summary, output_directory)
+    plot_cgm_angular_momentum_ratio(profiles, output_directory)
     plot_metallicity(profiles, summary, output_directory)
     plot_mu(profiles, summary, output_directory)
 
@@ -985,6 +766,15 @@ def load_evolution_history(model_output):
     with (directory / "parameters.csv").open(newline="") as stream:
         parameters = {row["parameter"]: row["value"] for row in csv.DictReader(stream)}
     history = read_rows(source / "landing_history.csv")
+    if "Mdot_wind_Msun_yr" not in history[0]:
+        # Older fixed-mu histories saved only the total landing rate.
+        if (parameters.get("kernel_mass_origin") != "nuclear_launch"
+                or parameters.get("landing_mass_origin") != "nuclear_plus_cgm"):
+            raise ValueError("Cannot recover the nuclear/CGM split for this history")
+        mu = float(parameters["mu"])
+        for row in history:
+            row["Mdot_wind_Msun_yr"] = row["Mdot_land_Msun_yr"] / (1.0 + mu)
+            row["Mdot_CGM_Msun_yr"] = row["Mdot_land_Msun_yr"] - row["Mdot_wind_Msun_yr"]
     initial_gas = {}
     masses = []
     # Aggregate one saved time at a time rather than retaining the full disk CSV.
@@ -994,8 +784,7 @@ def load_evolution_history(model_output):
             if not initial_gas:
                 initial_gas = {(float(row["R_lo_kpc"]), float(row["R_hi_kpc"])):
                                float(row["Sigma_g_Msun_kpc2"]) for row in rows}
-            enclosed = [sum(float(row["M_g_Msun"]) for row in rows
-                            if float(row["R_hi_kpc"]) <= radius)
+            enclosed = [sum(float(row["M_g_Msun"]) for row in rows if float(row["R_hi_kpc"]) <= radius)
                         for radius in (1.0, 5.0, math.inf)]
             masses.append((float(time), enclosed))
     return history, masses, initial_gas, parameters
@@ -1006,29 +795,36 @@ def add_evolution_diagnostics(runs, initial_gas):
         for row in rows:
             area = math.pi * (row["R_hi_kpc"]**2 - row["R_lo_kpc"]**2)
             gas, Z = row["Sigma_g_Msun_kpc2"], row["Z"]
-            landing, star = row["Sigmadot_land_Msun_yr_kpc2"], row["Sigmadot_star_Msun_yr_kpc2"]
-            transport = (row["mass_flux_inner_Msun_yr"] - row["mass_flux_outer_Msun_yr"]) / area
-            metal_transport = (row["metal_flux_inner_Msun_yr"] - row["metal_flux_outer_Msun_yr"]) / area
+            landing, star = row["Sigmadot_land_Msun_Gyr_kpc2"], row["Sigmadot_star_Msun_Gyr_kpc2"]
+            transport = (row["mass_flux_inner_Msun_yr"] - row["mass_flux_outer_Msun_yr"]) / area * YEARS_PER_GYR
+            metal_transport = (row["metal_flux_inner_Msun_yr"] - row["metal_flux_outer_Msun_yr"]) / area * YEARS_PER_GYR
             initial = initial_gas[(row["R_lo_kpc"], row["R_hi_kpc"])]
             row["gas_density"] = gas / 1e6  # Msun/pc^2
             row["gas_ratio"] = gas / initial if initial > 0 else math.nan
             row["gas_landing"] = landing * SURFACE_RATE_PLOT_SCALE
             row["gas_star"] = -star * SURFACE_RATE_PLOT_SCALE
             row["gas_transport"] = transport * SURFACE_RATE_PLOT_SCALE
-            row["gas_net"] = row["dSigma_g_dt_Msun_kpc2_Myr"] / 1e3
+            row["gas_net"] = row["dSigma_g_dt_Msun_Gyr_kpc2"]
             # dZ/dt = (dSigma_Z/dt - Z*dSigma_g/dt)/Sigma_g,
             # retaining the solver's discrete face fluxes in both terms.
-            row["Z_landing"] = (row["Zdot_land_Msun_yr_kpc2"] - Z * landing) / gas * 1e9 if gas > 0 else math.nan
-            row["Z_star"] = summary["yield_y"] * star / gas * 1e9 if gas > 0 else math.nan
-            row["Z_transport"] = (metal_transport - Z * transport) / gas * 1e9 if gas > 0 else math.nan
+            if "Zdot_land_Msun_Gyr_kpc2" in row:
+                metal_source = row["Zdot_land_Msun_Gyr_kpc2"]
+            elif "Z_land_mixing" in row:
+                # Older fixed-mixture exports supply incident Z, rather than
+                # its product with the landing rate. Keep that saved input.
+                metal_source = row["Z_land_mixing"] * landing
+            else:
+                raise ValueError("Evolution budgets require the saved incident metal rate or incident abundance")
+            row["Z_landing"] = (metal_source - Z * landing) / gas if gas > 0 else math.nan
+            row["Z_star"] = summary["yield_y"] * star / gas if gas > 0 else math.nan
+            row["Z_transport"] = (metal_transport - Z * transport) / gas if gas > 0 else math.nan
             row["Z_net"] = row["dZ_dt_per_Myr"] * 1e3
 
 
-def plot_evolution_budgets(runs, colors, time_handles, epoch_title, output_directory, fiducial,
-                           prefixes=("gas", "Z")):
+def plot_evolution_budgets(runs, colors, time_handles, epoch_title, output_directory, fiducial, prefixes=("gas", "Z")):
     dotted, dashed = (0, (0.1, 3.6)), (0, (4.0, 3.0))
     for prefix in prefixes:
-        ylabel = SURFACE_RATE_LABEL if prefix == "gas" else r"$\dot{Z}\;[\mathrm{Gyr}^{-1}]$"
+        ylabel = SURFACE_RATE_LABEL if prefix == "gas" else r"$\mathrm{d}(Z/Z_\odot)/\mathrm{d}t\;[\mathrm{Gyr}^{-1}]$"
         figure, axes = plt.subplots(2, 1, figsize=(3.5, 4.6), sharex=True)
         panels = [[("landing", "Landing", "-"), ("star", "Star formation", dashed)],
                   [("net", "Net", "-"), ("transport", "Transport", dotted)]]
@@ -1036,6 +832,8 @@ def plot_evolution_budgets(runs, colors, time_handles, epoch_title, output_direc
             handles = []
             for suffix, label, style in quantities:
                 curves = [finite_xy(rows, "R_kpc", f"{prefix}_{suffix}") for _, rows, _ in runs]
+                if prefix == "Z":
+                    curves = [(radius, [value / SOLAR_METALLICITY for value in values]) for radius, values in curves]
                 fixed = len(curves) > 1 and all(same_time_curve(curves[0], curve) for curve in curves[1:])
                 width = 1.3 if style == dotted else 1.0
                 for i, (radius, values) in enumerate(curves[:1] if fixed else curves):
@@ -1043,7 +841,7 @@ def plot_evolution_budgets(runs, colors, time_handles, epoch_title, output_direc
                               linestyle=style, linewidth=width, dash_capstyle="round")
                 handles.append(Line2D([], [], color="black", linestyle=style, linewidth=width,
                                       dash_capstyle="round", label=label))
-            axis.set_ylabel(ylabel)
+            axis.set_ylabel(quantity_unit_label(ylabel))
             axis.legend(handles=handles, loc="best", **TIME_LEGEND_STYLE)
             if fiducial:
                 axis.set_xlim(0, FIDUCIAL_PLOT_R_MAX_KPC)
@@ -1053,18 +851,20 @@ def plot_evolution_budgets(runs, colors, time_handles, epoch_title, output_direc
         figure.legend(handles=time_handles, loc="upper center", bbox_to_anchor=(0.59, 0.995),
                       ncol=min(5, len(runs)), title=epoch_title, title_fontsize=8, **TIME_LEGEND_STYLE)
         figure.subplots_adjust(left=0.20, right=0.96, bottom=0.12, top=0.89, hspace=0.12)
+
         figure.savefig(output_directory / f"{prefix}_budget.pdf", bbox_inches=None)
         plt.close(figure)
 
 
 def plot_evolution_histories(history, masses, parameters, burst_peak, output_directory):
+    """The pre-CGM curve counts nuclear material landing in the modeled annulus."""
     period = float(parameters.get("burst_period_Myr", 0.0))
     relative = burst_peak is not None and period == 0.0
     reference = burst_peak if relative else 0.0
     xlabel = r"$t-t_{\rm peak}\;[\mathrm{Myr}]$" if relative else r"$t\;[\mathrm{Myr}]$"
     time = [row["t_Myr"] - reference for row in history]
-    curves = [([row["Mdot_launch_Msun_yr"] for row in history], r"$\dot{M}_{\rm launch}$", (0, (0.1, 3.6)), 1.3),
-              ([row["Mdot_wind_Msun_yr"] for row in history], r"$\dot{M}_{\rm ret,nuc}$", (0, (4.0, 3.0)), 1.0),
+    curves = [([row["Mdot_launch_Msun_yr"] for row in history], r"$\dot{M}_w$", (0, (0.1, 3.6)), 1.3),
+              ([row["Mdot_wind_Msun_yr"] for row in history], r"$\dot{M}_{\rm pre\!-\!CGM}$ (annulus)", (0, (4.0, 3.0)), 1.0),
               ([row["Mdot_CGM_Msun_yr"] for row in history], r"$\dot{M}_{\rm CGM}$", (0, (2.0, 2.0)), 1.0),
               ([row["Mdot_land_Msun_yr"] for row in history], r"$\dot{M}_{\rm land}$", "-", 1.0)]
     recurrent = period > 0.0 and time[-1] - time[0] > 4.0 * period
@@ -1073,12 +873,11 @@ def plot_evolution_histories(history, masses, parameters, burst_peak, output_dir
     else:
         figure, axis = plt.subplots(figsize=MODEL_FIGURE_SIZE)
     for values, label, style, width in curves:
-        axis.plot(time, values, color="black", linestyle=style, linewidth=width,
-                  dash_capstyle="round", label=label)
+        axis.plot(time, values, color="black", linestyle=style, linewidth=width, dash_capstyle="round", label=label)
     axis.set_xlim(time[0], time[-1])
     axis.set_ylim(bottom=0)
     axis.set_xlabel(xlabel)
-    axis.set_ylabel(r"$\dot{M}\;[M_\odot\,\mathrm{yr}^{-1}]$")
+    axis.set_ylabel(quantity_unit_label(r"$\dot{M}\;[M_\odot\,\mathrm{yr}^{-1}]$"))
     if recurrent:
         # Separate the absolute history and one resolved cycle; an inset would hide
         # the dense repeated signal and its legend.
@@ -1086,29 +885,27 @@ def plot_evolution_histories(history, masses, parameters, burst_peak, output_dir
         for values, _, style, width in curves:
             selected = [(t - cycle_start, value) for t, value in zip(time, values)
                         if cycle_start <= t <= cycle_start + period]
-            detail.plot(*zip(*selected), color="black", linestyle=style, linewidth=width,
-                        dash_capstyle="round")
+            detail.plot(*zip(*selected), color="black", linestyle=style, linewidth=width, dash_capstyle="round")
         detail.set_xlim(0.0, period)
         detail.set_xlabel(r"Time since peak $[\mathrm{Myr}]$")
-        detail.set_ylabel(r"$\dot{M}\;[M_\odot\,\mathrm{yr}^{-1}]$")
+        detail.set_ylabel(quantity_unit_label(r"$\dot{M}\;[M_\odot\,\mathrm{yr}^{-1}]$"))
         handles, labels = axis.get_legend_handles_labels()
-        figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.59, 0.98),
-                      ncol=2, **TIME_LEGEND_STYLE)
+        figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.59, 0.98), ncol=2, **TIME_LEGEND_STYLE)
     else:
         axis.legend(loc="upper right", **TIME_LEGEND_STYLE)
     if not recurrent and burst_peak is not None and time[-1] > 300:
-        inset = axis.inset_axes([0.43, 0.35, 0.52, 0.36])
+        inset = axis.inset_axes([0.43, 0.30, 0.52, 0.36])
         for values, _, style, width in curves:
             selected = [(t, value) for t, value in zip(time, values) if -30 <= t <= 100]
-            inset.plot(*zip(*selected), color="black", linestyle=style, linewidth=width,
-                       dash_capstyle="round")
+            inset.plot(*zip(*selected), color="black", linestyle=style, linewidth=width, dash_capstyle="round")
         inset.set_xlim(-30, 100)
         inset.set_ylim(bottom=0)
         inset.tick_params(labelsize=7)
     if recurrent:
-        figure.subplots_adjust(left=0.20, right=0.94, bottom=0.12, top=0.91, hspace=0.55)
+        figure.subplots_adjust(left=0.20, right=0.94, bottom=0.12, top=0.87, hspace=0.55)
     else:
         figure.subplots_adjust(left=0.20, right=0.94, bottom=0.15, top=0.87)
+
     figure.savefig(output_directory / "launch_landing_history.pdf", bbox_inches=None)
     plt.close(figure)
 
@@ -1123,8 +920,9 @@ def plot_evolution_histories(history, masses, parameters, burst_peak, output_dir
     axis.set_yscale("log")
     axis.margins(y=0.15)
     axis.set_xlabel(xlabel)
-    axis.set_ylabel(r"$M_{\rm g}(<R)\;[M_\odot]$")
+    axis.set_ylabel(quantity_unit_label(r"$M_{\rm g}(<R)\;[M_\odot]$"))
     figure.subplots_adjust(left=0.20, right=0.94, bottom=0.15, top=0.87)
+
     figure.savefig(output_directory / "enclosed_gas_history.pdf", bbox_inches=None)
     plt.close(figure)
 
@@ -1134,12 +932,11 @@ def epoch_legend(times, title, signed=False):
         plt.get_cmap("viridis")(0.1 + 0.8*i/(len(times)-1)) for i in range(len(times))
     ]
     labels = [f"{t:+g}" if signed and t != 0.0 else f"{t:g}" for t in times]
-    handles = [Line2D([], [], color=colors[i], linewidth=1.0, label=rf"${label}$")
-               for i, label in enumerate(labels)]
+    handles = [Line2D([], [], color=colors[i], linewidth=1.0, label=rf"${label}$") for i, label in enumerate(labels)]
     return colors, handles, title
 
 
-def render_time_profiles(model_output, output_directory, phase_snapshots=None):
+def render_time_profiles(model_output, output_directory, phase_snapshots=None, *, figure_names=None):
     """One single-column figure per quantity, with saved times overlaid."""
     runs, title, burst_peak = load_time_profiles(model_output)
     history, masses, initial_gas, parameters = load_evolution_history(model_output)
@@ -1181,31 +978,31 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
     dashed = (0, (4.0, 3.0))
     short_dashed = (0, (2.0, 3.0))
     long_dashed = (0, (7.0, 3.0))
-    # Surface rates are converted for display. Angular columns retain face radii.
+    # Surface rates retain native units. Angular columns retain face radii.
     specifications = [
         ("Sigma_g", r"$\Sigma_{\rm g}\;[M_\odot\,\mathrm{pc}^{-2}]$", [("gas_density", None, "-")]),
         ("Sigma_g_change", r"$\Sigma_{\rm g}/\Sigma_{\rm g,0}$", [("gas_ratio", None, "-")]),
         ("v_c", r"$v_c\;[\mathrm{km\,s^{-1}}]$", [("v_c_kms", None, "-")]),
         ("v_R", r"$v_R\;[\mathrm{km\,s^{-1}}]$", [("v_R_kms", None, "-")]),
         ("surface_rates", SURFACE_RATE_LABEL, [
-            ("Sigmadot_land_Msun_yr_kpc2", r"$\dot{\Sigma}_{\rm land}$", "-"),
-            ("Sigmadot_star_Msun_yr_kpc2", r"$\dot{\Sigma}_\star$", dotted)]),
+            ("Sigmadot_land_Msun_Gyr_kpc2", r"$\dot{\Sigma}_{\rm land}$", "-"),
+            ("Sigmadot_star_Msun_Gyr_kpc2", r"$\dot{\Sigma}_\star$", dotted)]),
         ("cumulative_landing_rate", r"$\dot{M}_{\rm land}(<R)\;[M_\odot\,\mathrm{yr}^{-1}]$", [
             ("cumulative_landing_Msun_yr", None, "-")]),
         ("Mdot_acc", r"$\dot{M}_{\rm acc}\;[M_\odot\,\mathrm{yr}^{-1}]$", [("Mdot_acc_Msun_yr", None, "-")]),
         ("t", r"$t\;[\mathrm{Gyr}]$", [
             ("t_inflow_Gyr", r"$t_{\rm inflow}$", "-"),
             ("t_depletion_Gyr", r"$t_{\rm depletion}$", dashed)]),
-        ("j", r"$j/j_{\rm nuc}$", [
-            ("j_land_kpc_kms", r"$j_{\rm land}$", "-")]),
-        ("Z", r"$Z$", [("Z", r"$Z_{\rm disk}$", "-"),
-                          ("Z_land_required", r"$Z_{\rm land}$", dashed)]),
+        ("j", r"$j/j_{\rm nuc}$", [("j_land_kpc_kms", r"$j_{\rm land}$", "-")]),
+        ("Z", METALLICITY_LABEL, [("Z", r"$Z_{\rm disk}$", "-"), ("Z_land_required", r"$Z_{\rm land}$", dashed)]),
         ("mu", r"$\mu$", [("mu_effective", r"$\mu_{\rm eff}$", "-"), ("mu_Z", r"$\mu_Z$", dotted)]),
         ("ell", r"$\ell\;[\mathrm{kpc}]$", [("ell_kpc", None, "-")]),
-        ("effective_accretion", SURFACE_RATE_LABEL, [("Sigmadot_eff_Eulerian_Msun_yr_kpc2", r"$\dot{\Sigma}_{\rm eff}$ (Eulerian)", "-")]),
+        ("effective_accretion", SURFACE_RATE_LABEL, [("Sigmadot_eff_Eulerian_Msun_Gyr_kpc2", r"$\dot{\Sigma}_{\rm eff}$ (Eulerian)", "-")]),
     ]
     output_directory.mkdir(parents=True, exist_ok=True)
     for name, ylabel, quantities in specifications:
+        if figure_names is not None and name not in figure_names:
+            continue
         use_phase = name in {"surface_rates", "cumulative_landing_rate", "Mdot_acc"}
         runs = phase_runs if use_phase else age_runs
         colors, time_handles, epoch_title = phase_style if use_phase else age_style
@@ -1228,6 +1025,8 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
                     values = [value/rows[0]["j_nucl_kpc_kms"] for value in values]
                 elif name in {"surface_rates", "effective_accretion"}:
                     values = [value * SURFACE_RATE_PLOT_SCALE for value in values]
+                elif name == "Z":
+                    values = [value / SOLAR_METALLICITY for value in values]
                 curves.append((radius, values))
             fixed = (len(curves) > 1 or column == "v_c_kms") and all(
                 same_time_curve(curves[0], curve) for curve in curves[1:]
@@ -1257,8 +1056,7 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
         # Fixed references are shared by the snapshots; verify this before
         # drawing them once instead of concealing any temporal variation.
         reference_columns = {
-            "j": [("j_disk_kpc_kms", r"$j_{\rm disk}$", "-"),
-                  ("j_CGM_kpc_kms", r"$j_{\rm CGM}$", "-")],
+            "j": [("j_disk_kpc_kms", r"$j_{\rm disk}$", "-"), ("j_CGM_kpc_kms", r"$j_{\rm CGM}$", "-")],
             "Z": [("Z_nucl", r"$Z_{\rm nuc}$", short_dashed), ("Z_CGM", r"$Z_{\rm CGM}$", long_dashed)],
         }.get(name, [])
         for column, label, style in reference_columns:
@@ -1278,6 +1076,8 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
                 values = [summary[column] for _, _, summary in runs]
                 if len(set(values)) != 1:
                     raise ValueError(f"Expected a fixed {column} reference across snapshots")
+                if name == "Z":
+                    values = [value / SOLAR_METALLICITY for value in values]
                 axis.axhline(values[0], color="black", linestyle=style, linewidth=linewidth,
                              dash_capstyle="round", zorder=1)
             quantity_handles.append(Line2D([], [], color="black", linestyle=style, linewidth=linewidth,
@@ -1285,7 +1085,7 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
 
         axis.set_box_aspect(1)
         axis.set_xlabel(r"$R\;[\mathrm{kpc}]$")
-        axis.set_ylabel(ylabel)
+        axis.set_ylabel(quantity_unit_label(ylabel))
         if fiducial:
             axis.set_xlim(0.0, FIDUCIAL_PLOT_R_MAX_KPC)
         if name in {"t", "surface_rates", "Sigma_g"}:
@@ -1299,11 +1099,15 @@ def render_time_profiles(model_output, output_directory, phase_snapshots=None):
                           ncol=min(5, len(runs)), title=epoch_title, title_fontsize=8, **TIME_LEGEND_STYLE)
         mark_launch_radius(axis, runs[0][2])
         figure.subplots_adjust(left=0.20, right=0.98, bottom=0.15, top=0.87)
+
         figure.savefig(output_directory / f"{name}.pdf", bbox_inches=None)
         plt.close(figure)
-    plot_evolution_budgets(phase_runs, *phase_style, output_directory, fiducial, prefixes=("gas",))
-    plot_evolution_budgets(age_runs, *age_style, output_directory, fiducial, prefixes=("Z",))
-    plot_evolution_histories(history, masses, parameters, burst_peak, output_directory)
+    if figure_names is None or "gas_budget" in figure_names:
+        plot_evolution_budgets(phase_runs, *phase_style, output_directory, fiducial, prefixes=("gas",))
+    if figure_names is None or "Z_budget" in figure_names:
+        plot_evolution_budgets(age_runs, *age_style, output_directory, fiducial, prefixes=("Z",))
+    if figure_names is None:
+        plot_evolution_histories(history, masses, parameters, burst_peak, output_directory)
 
 
 def main():
@@ -1315,22 +1119,13 @@ def main():
         type=Path,
         help="directory containing profiles.csv/summary.csv/rotation_curves.csv, or a snapshots.csv manifest",
     )
-    parser.add_argument(
-        "plot_output",
-        nargs="?",
-        type=Path,
-        help="plot directory; defaults to MODEL_OUTPUT/plots",
-    )
+    parser.add_argument("plot_output", nargs="?", type=Path, help="plot directory; defaults to MODEL_OUTPUT/plots")
     parser.add_argument(
         "--phase-snapshots",
         type=Path,
         help="recurrent-run snapshots at distinct burst phases, used for landing, mass flow and gas budgets",
     )
-    parser.add_argument(
-        "--no-title",
-        action="store_true",
-        help="suppress the galaxy title on steady model plots",
-    )
+    parser.add_argument("--no-title", action="store_true", help="suppress the galaxy title on steady model plots")
     arguments = parser.parse_args()
     output_directory = arguments.plot_output or arguments.model_output / "plots"
     manifest = arguments.model_output / "snapshots.csv"
@@ -1338,11 +1133,7 @@ def main():
         with plt.rc_context(TIME_FIGURE_STYLE):
             render_time_profiles(arguments.model_output, output_directory, arguments.phase_snapshots)
     else:
-        render_model_run(
-            arguments.model_output,
-            output_directory,
-            show_title=not arguments.no_title,
-        )
+        render_model_run(arguments.model_output, output_directory, show_title=not arguments.no_title)
     print(f"Wrote model figures to: {output_directory}")
 
 

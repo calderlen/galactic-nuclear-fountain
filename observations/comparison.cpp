@@ -84,6 +84,10 @@ double oxygen_abundance_from_metallicity(double metallicity){
     return OH12_sun+std::log10(metallicity/Z_sun);
 }
 
+double metallicity_from_oxygen_abundance(double OH12){
+    return Z_sun*std::pow(10.0,OH12-OH12_sun);
+}
+
 std::vector<Observation> select_observations(
     const std::vector<CatalogRow>& catalog,
     const std::string& galaxy,
@@ -136,6 +140,12 @@ std::vector<Observation> collapse_repeated_regions(const std::vector<Observation
             group.front().offset_ra_arcsec,group.front().offset_de_arcsec,
             weighted_mean(group,&Observation::R_kpc),OH12,e_OH12
         });
+        for (const auto& observation: group) {
+            if (observation.source_sequences.empty())
+                result.back().source_sequences.push_back(observation.source_sequence);
+            else result.back().source_sequences.insert(result.back().source_sequences.end(),
+                observation.source_sequences.begin(),observation.source_sequences.end());
+        }
     }
     std::sort(result.begin(),result.end(),[](const Observation& left,const Observation& right){
         return left.R_kpc<right.R_kpc;

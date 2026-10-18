@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import bisect
 import csv
 import json
 import math
@@ -22,39 +21,14 @@ from typing import Iterable, Sequence
 PLOT_SCRIPT_DIRECTORY = Path(__file__).resolve().parents[1] / "plot"
 if str(PLOT_SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(PLOT_SCRIPT_DIRECTORY))
+from surface_rate_units import read_rate_rows
+from core_calculations import collapse_abundances, compare_abundances
 
-from paper_galaxies import (  # noqa: E402
-    PAPER_GALAXIES,
-    PAPER_GALAXY_SET,
-    canonical_galaxy_name,
-    galaxy_label,
-)
+from paper_galaxies import PAPER_GALAXIES, PAPER_GALAXY_SET, canonical_galaxy_name, galaxy_label  # noqa: E402
 
 
-DEFAULT_GALAXIES = (
-    "NGC3521",
-    "NGC7793",
-    "NGC2403",
-    "NGC3198",
-    "NGC5055",
-    "NGC6946",
-)
-DEFAULT_MU_VALUES = (
-    0.0,
-    0.03,
-    0.05,
-    0.08,
-    0.12,
-    0.2,
-    0.3,
-    0.5,
-    0.7,
-    1.0,
-    1.5,
-    2.0,
-    3.0,
-    5.0,
-)
+DEFAULT_GALAXIES = ("NGC3521", "NGC7793", "NGC2403", "NGC3198", "NGC5055", "NGC6946")
+DEFAULT_MU_VALUES = (0.0, 0.03, 0.05, 0.08, 0.12, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0)
 CALIBRATIONS = ("KK04", "PT05")
 OH12_SUN = 8.69
 Z_SUN = 0.0139
@@ -84,8 +58,8 @@ RESULT_FIELDS = (
     "max_v_R_kpc_yr",
     "min_v_R_kms",
     "max_v_R_kms",
-    "min_Sigmadot_land_Msun_yr_kpc2",
-    "max_Sigmadot_land_Msun_yr_kpc2",
+    "min_Sigmadot_land_Msun_Gyr_kpc2",
+    "max_Sigmadot_land_Msun_Gyr_kpc2",
     "achieved_Mdot_land_Msun_yr",
     "landing_relative_error",
     "n_metallicity_profile_points",
@@ -159,10 +133,7 @@ def linear_space(start: float, stop: float, count: int) -> list[float]:
         raise ValueError("linear spacing requires at least one value")
     if count == 1:
         return [float(start)]
-    return [
-        start + (stop - start) * index / (count - 1)
-        for index in range(count)
-    ]
+    return [start + (stop - start) * index / (count - 1) for index in range(count)]
 
 
 def logarithmic_space(start: float, stop: float, count: int) -> list[float]:
@@ -187,14 +158,7 @@ def build_grid(
     for mu in unique_mu:
         for beta in ([0.0] if mu == 0.0 else beta_values):
             for eta in eta_values:
-                points.append(
-                    SweepPoint(
-                        f"p{sequence:06d}",
-                        mu,
-                        float(beta),
-                        float(eta),
-                    )
-                )
+                points.append(SweepPoint(f"p{sequence:06d}", mu, float(beta), float(eta)))
                 sequence += 1
     return points
 
@@ -221,8 +185,7 @@ def format_value(value: object) -> str:
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="") as stream:
-        return list(csv.DictReader(stream))
+    return read_rate_rows(path)
 
 
 def write_csv(path: Path, fields: Sequence[str], rows: Iterable[dict[str, object]]) -> None:
@@ -252,17 +215,9 @@ def rotation_sources(input_directory: Path) -> list[str]:
     return sources
 
 
-def load_observations(
-    catalog_path: Path,
-    galaxy: str,
-    calibration: str,
-) -> list[Observation]:
+def load_observations(catalog_path: Path, galaxy: str, calibration: str) -> list[Observation]:
     selected: list[Observation] = []
-    required = (
-        "R_adopted_kpc",
-        f"OH12_{calibration}_dex",
-        f"e_OH12_{calibration}_dex",
-    )
+    required = ("R_adopted_kpc", f"OH12_{calibration}_dex", f"e_OH12_{calibration}_dex")
     for row in read_csv(catalog_path):
         if row["galaxy"] != galaxy or not csv_bool(row.get(f"usable_OH12_{calibration}")):
             continue
@@ -282,103 +237,32 @@ def load_observations(
     return sorted(selected, key=lambda item: (item.radius_kpc, item.source_sequence))
 
 
+def core_observations(observations):
+    return [{"source_seq": row.source_sequence, "offRA_arcsec": row.offset_ra_arcsec,
+             "offDE_arcsec": row.offset_de_arcsec, "R_kpc": row.radius_kpc,
+             "OH12": row.oh12, "e_OH12": row.e_oh12} for row in observations]
+
+
 def collapse_repeated_regions(observations: Sequence[Observation]) -> list[Observation]:
-    grouped: dict[tuple[bool, float, float, int], list[Observation]] = defaultdict(list)
-    for observation in observations:
-        has_offset = observation.offset_ra_arcsec is not None and observation.offset_de_arcsec is not None
-        key = (
-            (True, float(observation.offset_ra_arcsec), float(observation.offset_de_arcsec), 0)
-            if has_offset
-            else (False, 0.0, 0.0, observation.source_sequence)
-        )
-        grouped[key].append(observation)
-
-    collapsed: list[Observation] = []
-    for key in sorted(grouped):
-        group = grouped[key]
-        weights = [1.0 / (item.e_oh12 * item.e_oh12) for item in group]
-        weight_sum = sum(weights)
-
-        def weighted(attribute: str) -> float:
-            return sum(weight * getattr(item, attribute) for weight, item in zip(weights, group)) / weight_sum
-
-        collapsed.append(
-            Observation(
-                source_sequence=group[0].source_sequence,
-                offset_ra_arcsec=group[0].offset_ra_arcsec,
-                offset_de_arcsec=group[0].offset_de_arcsec,
-                radius_kpc=weighted("radius_kpc"),
-                oh12=weighted("oh12"),
-                e_oh12=math.sqrt(1.0 / weight_sum),
-            )
-        )
+    collapsed = [Observation(source_sequence=row["source_seq"], offset_ra_arcsec=row["offRA_arcsec"],
+                            offset_de_arcsec=row["offDE_arcsec"], radius_kpc=row["R_kpc"],
+                            oh12=row["OH12"], e_oh12=row["e_OH12"])
+                 for row in collapse_abundances(core_observations(observations))]
+    def region_key(row):
+        if row.offset_ra_arcsec is not None and row.offset_de_arcsec is not None:
+            return True, row.offset_ra_arcsec, row.offset_de_arcsec, 0
+        return False, 0, 0, row.source_sequence
+    collapsed.sort(key=region_key)
     return sorted(collapsed, key=lambda item: item.radius_kpc)
 
 
-def interpolate(x: Sequence[float], y: Sequence[float], query: float) -> float:
-    if query == x[-1]:
-        return y[-1]
-    right = bisect.bisect_right(x, query)
-    left = right - 1
-    fraction = (query - x[left]) / (x[right] - x[left])
-    return y[left] + fraction * (y[right] - y[left])
-
-
-def compare_metallicity_curve(
-    observations: Sequence[Observation],
-    radii_kpc: Sequence[float],
-    metallicities: Sequence[float],
-) -> FitResult:
-    unique = collapse_repeated_regions(observations)
-    curve = sorted(
-        (radius, metallicity)
-        for radius, metallicity in zip(radii_kpc, metallicities)
-        if math.isfinite(radius) and math.isfinite(metallicity) and metallicity > 0.0
-    )
+def compare_metallicity_curve(observations, radii_kpc, metallicities) -> FitResult:
+    curve = sorted((radius, Z) for radius, Z in zip(radii_kpc, metallicities)
+                   if math.isfinite(radius) and math.isfinite(Z) and Z > 0)
     if len(curve) < 2:
+        unique = collapse_repeated_regions(observations)
         return FitResult(len(observations), len(unique), 0, "missing model curve", None, None, None, None, None)
-
-    curve_radii = [item[0] for item in curve]
-    curve_oh12 = [OH12_SUN + math.log10(item[1] / Z_SUN) for item in curve]
-    overlapping = [
-        item for item in unique if curve_radii[0] <= item.radius_kpc <= curve_radii[-1]
-    ]
-    if not overlapping:
-        return FitResult(len(observations), len(unique), 0, "no model-overlap points", None, None, None, None, None)
-
-    residuals: list[float] = []
-    sigmas: list[float] = []
-    for observation in overlapping:
-        model_oh12 = interpolate(curve_radii, curve_oh12, observation.radius_kpc)
-        residuals.append(observation.oh12 - model_oh12)
-        sigmas.append(math.hypot(observation.e_oh12, ABUNDANCE_SCATTER_DEX))
-
-    weights = [1.0 / (sigma * sigma) for sigma in sigmas]
-    weight_sum = sum(weights)
-    offset = sum(weight * residual for weight, residual in zip(weights, residuals)) / weight_sum
-    chi2_fixed = sum((residual / sigma) ** 2 for residual, sigma in zip(residuals, sigmas))
-    chi2_offset = sum(((residual - offset) / sigma) ** 2 for residual, sigma in zip(residuals, sigmas))
-    count = len(residuals)
-    kpc_span = max(item.radius_kpc for item in overlapping) - min(item.radius_kpc for item in overlapping)
-    if count < 2:
-        status = "no gradient fit"
-    elif count < 8:
-        status = "descriptive: fewer than 8 unique regions"
-    elif kpc_span < 2.0:
-        status = "descriptive: radial span below 2 kpc"
-    else:
-        status = "fit-grade"
-    return FitResult(
-        n_catalog_usable=len(observations),
-        n_unique_catalog_regions=len(unique),
-        n_model_overlap=count,
-        fit_status=status,
-        weighted_mean_residual_dex=offset,
-        chi2_fixed_model=chi2_fixed,
-        reduced_chi2_fixed_model=chi2_fixed / count,
-        chi2_after_offset=chi2_offset,
-        reduced_chi2_after_offset=chi2_offset / (count - 1) if count > 1 else None,
-    )
+    return FitResult(**compare_abundances(core_observations(observations), curve))
 
 
 def write_parameter_input(
@@ -391,11 +275,7 @@ def write_parameter_input(
 ) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     parameter_rows = read_csv(base_directory / "parameters.csv")
-    overrides = {
-        "mu": format(mu, ".17g"),
-        "beta": format(beta, ".17g"),
-        "eta": format(eta, ".17g"),
-    }
+    overrides = {"mu": format(mu, ".17g"), "beta": format(beta, ".17g"), "eta": format(eta, ".17g")}
     found: set[str] = set()
     for row in parameter_rows:
         name = row["name"]
@@ -411,10 +291,7 @@ def write_parameter_input(
     write_csv(destination / "parameters.csv", ("name", "value"), parameter_rows)
 
     required = ["profiles.csv", "gas_profiles.csv", "rotation_curves.csv"]
-    if any(
-        row["kind"] == "tabulated"
-        for row in read_csv(base_directory / "rotation_curves.csv")
-    ):
+    if any(row["kind"] == "tabulated" for row in read_csv(base_directory / "rotation_curves.csv")):
         required.append("rotation_profiles.csv")
     optional = (
         "metadata.csv",
@@ -521,7 +398,7 @@ def evaluate_model_output(
         radii = [float(row["R_kpc"]) for row in source_profiles]
         velocities = [float(row["v_R_kpc_yr"]) for row in source_profiles]
         velocities_kms = [float(row["v_R_kms"]) for row in source_profiles]
-        landing = [float(row["Sigmadot_land_Msun_yr_kpc2"]) for row in source_profiles]
+        landing = [float(row["Sigmadot_land_Msun_Gyr_kpc2"]) for row in source_profiles]
         cumulative = [float(row["cumulative_landing_Msun_yr"]) for row in source_profiles]
         metallicity = [float(row["Z"]) for row in source_profiles]
         achieved = float(summary["total_landing_Msun_yr"])
@@ -570,13 +447,11 @@ def evaluate_model_output(
                     "max_v_R_kpc_yr": max(velocities) if velocities else None,
                     "min_v_R_kms": min(velocities_kms) if velocities_kms else None,
                     "max_v_R_kms": max(velocities_kms) if velocities_kms else None,
-                    "min_Sigmadot_land_Msun_yr_kpc2": min(landing) if landing else None,
-                    "max_Sigmadot_land_Msun_yr_kpc2": max(landing) if landing else None,
+                    "min_Sigmadot_land_Msun_Gyr_kpc2": min(landing) if landing else None,
+                    "max_Sigmadot_land_Msun_Gyr_kpc2": max(landing) if landing else None,
                     "achieved_Mdot_land_Msun_yr": achieved,
                     "landing_relative_error": relative_error,
-                    "n_metallicity_profile_points": sum(
-                        math.isfinite(value) and value > 0.0 for value in metallicity
-                    ),
+                    "n_metallicity_profile_points": sum(math.isfinite(value) and value > 0.0 for value in metallicity),
                     "n_catalog_usable": fit.n_catalog_usable,
                     "n_unique_catalog_regions": fit.n_unique_catalog_regions,
                     "n_model_overlap": fit.n_model_overlap,
@@ -609,9 +484,7 @@ def rank_points(
             and row["rotation_source"] in sources
             and isinstance(row["reduced_chi2_fixed_model"], float)
         ):
-            scores[str(row["point_id"])][str(row["rotation_source"])] = float(
-                row["reduced_chi2_fixed_model"]
-            )
+            scores[str(row["point_id"])][str(row["rotation_source"])] = float(row["reduced_chi2_fixed_model"])
 
     ranked: list[RankedPoint] = []
     for point_id, source_scores in scores.items():
@@ -678,22 +551,9 @@ def run_galaxy_sweep(
                 )
                 if completed_process.returncode != 0:
                     error = completed_process.stderr.strip() or completed_process.stdout.strip()
-                    rows.extend(
-                        result_rows_for_failure(
-                            galaxy, point, sfr, sources, "model_failed", error[-1000:]
-                        )
-                    )
+                    rows.extend(result_rows_for_failure(galaxy, point, sfr, sources, "model_failed", error[-1000:]))
                 else:
-                    rows.extend(
-                        evaluate_model_output(
-                            galaxy,
-                            point,
-                            sfr,
-                            output_directory,
-                            sources,
-                            observations,
-                        )
-                    )
+                    rows.extend(evaluate_model_output(galaxy, point, sfr, output_directory, sources, observations))
         except subprocess.TimeoutExpired:
             rows.extend(
                 result_rows_for_failure(
@@ -706,11 +566,7 @@ def run_galaxy_sweep(
                 )
             )
         except Exception as error:  # Keep the rest of a scientific sweep usable.
-            rows.extend(
-                result_rows_for_failure(
-                    galaxy, point, sfr, sources, "evaluation_failed", str(error)[-1000:]
-                )
-            )
+            rows.extend(result_rows_for_failure(galaxy, point, sfr, sources, "evaluation_failed", str(error)[-1000:]))
 
         if progress_every > 0 and (completed % progress_every == 0 or completed == executable_points):
             elapsed = time.monotonic() - started
@@ -749,9 +605,7 @@ def retain_best_outputs(
             include_provenance=True,
         )
         if completed_process.returncode != 0:
-            raise RuntimeError(
-                f"Failed to retain {galaxy} rank {rank}: {completed_process.stderr.strip()}"
-            )
+            raise RuntimeError(f"Failed to retain {galaxy} rank {rank}: {completed_process.stderr.strip()}")
         point = ranked_point.point
         records.append(
             {
@@ -806,12 +660,7 @@ def plot_sweep_maps(
     register_hershey_weight_aliases()
     import smplotlib
 
-    smplotlib.set_style(
-        usetex=False,
-        fontsize=10,
-        figsize=(3.5, 3.5),
-        dpi=144,
-    )
+    smplotlib.set_style(usetex=False, fontsize=10, figsize=(3.5, 3.5), dpi=144)
     plt.rcParams.update(
         {
             "axes.grid": False,
@@ -825,11 +674,7 @@ def plot_sweep_maps(
     score_cmap = plt.get_cmap("RdYlBu").copy()
     score_cmap.set_bad("white")
     positive_mu = [value for value in mu_values if value > 0.0]
-    point_by_coordinate = {
-        (point.mu, point.beta, point.eta): point
-        for point in points
-        if point.mu > 0.0
-    }
+    point_by_coordinate = {(point.mu, point.beta, point.eta): point for point in points if point.mu > 0.0}
 
     with PdfPages(path) as pdf:
         for galaxy in galaxies:
@@ -850,14 +695,7 @@ def plot_sweep_maps(
                             for beta in beta_values
                         ]
                     )
-                image = axis.imshow(
-                    matrix,
-                    origin="lower",
-                    aspect="auto",
-                    cmap=score_cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                )
+                image = axis.imshow(matrix, origin="lower", aspect="auto", cmap=score_cmap, vmin=vmin, vmax=vmax)
                 axis.set_title(rf"$\eta={eta:.3g}$")
                 axis.set_xticks(range(0, len(beta_values), 3), [f"{beta_values[i]:.2g}" for i in range(0, len(beta_values), 3)])
                 axis.set_yticks(range(len(positive_mu)), [f"{value:g}" for value in positive_mu])
@@ -865,12 +703,7 @@ def plot_sweep_maps(
                 axis.set_ylabel(r"$\mu$")
             figure.suptitle(galaxy)
             if image is not None:
-                figure.colorbar(
-                    image,
-                    ax=axes,
-                    shrink=0.75,
-                    label=r"$\log_{10}(\widetilde{\chi^2_\nu})$",
-                )
+                figure.colorbar(image, ax=axes, shrink=0.75, label=r"$\log_{10}(\widetilde{\chi^2_\nu})$")
             pdf.savefig(figure)
             plt.close(figure)
 
@@ -910,24 +743,10 @@ def plot_sweep_maps(
                     score_cmap,
                 ),
                 (best_eta_matrix, r"$\eta$ giving the best score", r"$\eta$", None, None, None),
-                (
-                    invalid_matrix,
-                    "Invalid wind loadings",
-                    "count",
-                    0.0,
-                    float(len(eta_values)),
-                    None,
-                ),
+                (invalid_matrix, "Invalid wind loadings", "count", 0.0, float(len(eta_values)), None),
             )
             for axis, (matrix, title, color_label, panel_min, panel_max, cmap) in zip(axes, panels):
-                image = axis.imshow(
-                    matrix,
-                    origin="lower",
-                    aspect="auto",
-                    cmap=cmap,
-                    vmin=panel_min,
-                    vmax=panel_max,
-                )
+                image = axis.imshow(matrix, origin="lower", aspect="auto", cmap=cmap, vmin=panel_min, vmax=panel_max)
                 axis.set_title(title)
                 axis.set_xticks(range(0, len(beta_values), 3), [f"{beta_values[i]:.2g}" for i in range(0, len(beta_values), 3)])
                 axis.set_yticks(range(len(positive_mu)), [f"{value:g}" for value in positive_mu])
@@ -972,17 +791,9 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--eta-count", type=int, default=12)
     parser.add_argument("--keep-best", type=int, default=10)
     parser.add_argument("--ranking-calibration", choices=CALIBRATIONS, default="KK04")
-    parser.add_argument(
-        "--model-binary",
-        type=Path,
-        default=repo_root / "build" / "galactic-nuclear-fountain-model",
-    )
+    parser.add_argument("--model-binary", type=Path, default=repo_root / "build" / "galactic-nuclear-fountain-model")
     parser.add_argument("--input-root", type=Path, default=repo_root / "input" / "model_inputs")
-    parser.add_argument(
-        "--metallicity-catalog",
-        type=Path,
-        default=repo_root / "input" / "sings_hii_regions.csv",
-    )
+    parser.add_argument("--metallicity-catalog", type=Path, default=repo_root / "input" / "sings_hii_regions.csv")
     parser.add_argument("--timeout", type=float, default=60.0, help="Maximum seconds for one model run")
     parser.add_argument("--progress-every", type=int, default=100)
     parser.add_argument("--skip-plots", action="store_true", help="Skip PDF generation (useful for automated tests)")
@@ -993,32 +804,19 @@ def validate_paths(arguments: argparse.Namespace, galaxies: Sequence[str]) -> No
     if arguments.output.exists() and any(arguments.output.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {arguments.output}")
     if not arguments.model_binary.is_file():
-        raise FileNotFoundError(
-            f"Model executable is missing: {arguments.model_binary}. Run `make` first."
-        )
+        raise FileNotFoundError(f"Model executable is missing: {arguments.model_binary}. Run `make` first.")
     if not arguments.metallicity_catalog.is_file():
         raise FileNotFoundError(arguments.metallicity_catalog)
     for galaxy in galaxies:
         directory = arguments.input_root / galaxy
-        for name in (
-            "parameters.csv",
-            "profiles.csv",
-            "gas_profiles.csv",
-            "rotation_curves.csv",
-        ):
+        for name in ("parameters.csv", "profiles.csv", "gas_profiles.csv", "rotation_curves.csv"):
             if not (directory / name).is_file():
                 raise FileNotFoundError(directory / name)
-        if any(
-            row["kind"] == "tabulated"
-            for row in read_csv(directory / "rotation_curves.csv")
-        ):
+        if any(row["kind"] == "tabulated" for row in read_csv(directory / "rotation_curves.csv")):
             rotation_profile_path = directory / "rotation_profiles.csv"
             if not rotation_profile_path.is_file():
                 raise FileNotFoundError(rotation_profile_path)
-            parameters = {
-                row["name"]: row["value"]
-                for row in read_csv(directory / "parameters.csv")
-            }
+            parameters = {row["name"]: row["value"] for row in read_csv(directory / "parameters.csv")}
             r_in = float(parameters["R_in_kpc"])
             r_out = float(parameters["R_out_kpc"])
             for row in read_csv(rotation_profile_path):
@@ -1044,12 +842,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     parser = build_parser(repo_root)
     arguments = parser.parse_args(argv)
-    galaxies = list(
-        dict.fromkeys(
-            canonical_galaxy_name(galaxy)
-            for galaxy in (arguments.galaxies or DEFAULT_GALAXIES)
-        )
-    )
+    galaxies = list(dict.fromkeys(canonical_galaxy_name(galaxy) for galaxy in (arguments.galaxies or DEFAULT_GALAXIES)))
 
     try:
         if not arguments.skip_plots:
@@ -1077,11 +870,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     best_rows: list[dict[str, object]] = []
     started = time.monotonic()
 
-    print(
-        f"Sweep grid: {len(points)} canonical points per galaxy; "
-        f"{len(points)} model runs per galaxy",
-        flush=True,
-    )
+    print(f"Sweep grid: {len(points)} canonical points per galaxy; " f"{len(points)} model runs per galaxy", flush=True)
     for galaxy in galaxies:
         input_directory = arguments.input_root / galaxy
         print(f"Starting {galaxy} with nuclear SFR={sfrs[galaxy]:.6g} Msun/yr", flush=True)
@@ -1097,13 +886,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         all_rows.extend(rows)
         all_sources[galaxy] = sources
-        rankings[galaxy] = rank_points(
-            rows, points, galaxy, arguments.ranking_calibration, sources
-        )
-        print(
-            f"{galaxy}: {len(rankings[galaxy])} independently valid, rankable points",
-            flush=True,
-        )
+        rankings[galaxy] = rank_points(rows, points, galaxy, arguments.ranking_calibration, sources)
+        print(f"{galaxy}: {len(rankings[galaxy])} independently valid, rankable points", flush=True)
 
     write_csv(arguments.output / "sweep_results.csv", RESULT_FIELDS, all_rows)
 
@@ -1163,11 +947,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ],
             "keep_best_per_galaxy": arguments.keep_best,
         },
-        "comparison_constants": {
-            "OH12_sun": OH12_SUN,
-            "Z_sun": Z_SUN,
-            "abundance_scatter_dex": ABUNDANCE_SCATTER_DEX,
-        },
+        "comparison_constants": {"OH12_sun": OH12_SUN, "Z_sun": Z_SUN, "abundance_scatter_dex": ABUNDANCE_SCATTER_DEX},
         "elapsed_seconds": time.monotonic() - started,
         "outputs": {
             "sweep_results": "sweep_results.csv",
@@ -1180,10 +960,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(manifest, stream, indent=2)
         stream.write("\n")
 
-    print(
-        f"Completed sweep in {manifest['elapsed_seconds']:.1f}s; outputs: {arguments.output}",
-        flush=True,
-    )
+    print(f"Completed sweep in {manifest['elapsed_seconds']:.1f}s; outputs: {arguments.output}", flush=True)
     return 0
 
 

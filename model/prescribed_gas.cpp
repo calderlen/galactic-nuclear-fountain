@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -50,8 +51,12 @@ RK4Solution solve_prescribed_gas(const PrescribedGasParameters& p,double h0,doub
 }
 
 PrescribedGasProfile prescribed_gas_profile(double R,const PrescribedGasParameters& p,const RK4Solution& solution){
-    if (!std::isfinite(R) || R<p.R_in || R>p.R_out)
+    // Match the tabulated profiles' endpoint-roundoff tolerance. Two RK4
+    // half steps can land one ulp beyond the same closed annulus endpoint.
+    const double tolerance=16.0*std::numeric_limits<double>::epsilon()*std::max({std::abs(p.R_in),std::abs(p.R_out),1.0});
+    if (!std::isfinite(R) || R<p.R_in-tolerance || R>p.R_out+tolerance)
         throw std::out_of_range("Requested radius is outside the prescribed-gas model");
+    R=std::clamp(R,p.R_in,p.R_out);
     constexpr double pi=3.14159265358979323846;
     const double gas=gas_value(R,&p),star=star_value(R,&p),landing=landing_value(R,&p);
     const double accretion=evaluate(solution,R)[0];

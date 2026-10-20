@@ -6,6 +6,7 @@ using Dierckx
 using Statistics
 
 const DEFAULT_INPUT_DIR = normpath(joinpath(@__DIR__, "..", "input"))
+const DEFAULT_FIT_CONFIG_DIR = normpath(joinpath(@__DIR__, "..", "config", "galaxies"))
 
 const GALAXY_ALIASES = Dict("HOI" => "UGC5139", "HOII" => "UGC4305")
 const SFR_CROSSCALIBRATION_R_R25 = (0.9, 1.2)
@@ -22,7 +23,7 @@ function normalize_galaxy_name(name)
 end
 
 """Fit an uncertainty-weighted cubic smoothing spline without extrapolation."""
-function fit_uncertainty_weighted_smoothing_spline(R_values, values, error_values; description)
+function fit_uncertainty_weighted_smoothing_spline(R_values, values, error_values; description, smoothing_factor=1.0)
     R = Float64.(R_values)
     y = Float64.(values)
     errors = Float64.(error_values)
@@ -31,9 +32,10 @@ function fit_uncertainty_weighted_smoothing_spline(R_values, values, error_value
     all(isfinite.(y)) || error("$description spline values must be finite")
     all(isfinite.(errors) .& (errors .> 0)) || error("$description spline uncertainties must be finite and positive")
     all(diff(R) .> 0) || error("$description spline radii must be strictly increasing")
+    isfinite(smoothing_factor) && smoothing_factor >= 0 || error("$description smoothing factor must be finite and nonnegative")
 
     weights = 1.0 ./ errors
-    spline = Spline1D(R, y; w=weights, k=3, s=length(R), bc="error")
+    spline = Spline1D(R, y; w=weights, k=3, s=smoothing_factor*length(R), bc="error")
     fitted = spline(R)
     fitted_derivative = derivative(spline, R)
 
@@ -46,13 +48,13 @@ function fit_uncertainty_weighted_smoothing_spline(R_values, values, error_value
     )
 end
 
-fit_sparc_smoothing_spline(R_values, V_values, error_values) =
-    fit_uncertainty_weighted_smoothing_spline(R_values, V_values, error_values; description="SPARC rotation-curve")
+fit_sparc_smoothing_spline(R_values, V_values, error_values; smoothing_factor=1.0) =
+    fit_uncertainty_weighted_smoothing_spline(R_values, V_values, error_values; description="SPARC rotation-curve", smoothing_factor)
 
-fit_gas_smoothing_spline(R_values, Sigma_values, error_values) =
-    fit_uncertainty_weighted_smoothing_spline(R_values, Sigma_values, error_values; description="gas-profile")
+fit_gas_smoothing_spline(R_values, Sigma_values, error_values; smoothing_factor=1.0) =
+    fit_uncertainty_weighted_smoothing_spline(R_values, Sigma_values, error_values; description="gas-profile", smoothing_factor)
 
-function fit_sfr_smoothing_spline(R_values, Sigma_values, error_values)
+function fit_sfr_smoothing_spline(R_values, Sigma_values, error_values; smoothing_factor=1.0)
     values = Float64.(Sigma_values)
     errors = Float64.(error_values)
     all(values .> 0) || error("Star-formation surface densities must be positive for the log spline")
@@ -64,6 +66,7 @@ function fit_sfr_smoothing_spline(R_values, Sigma_values, error_values)
         log.(values),
         errors ./ values;
         description="log star-formation-profile",
+        smoothing_factor,
     )
     fitted = exp.(log_spline.fitted)
     return (
@@ -205,8 +208,14 @@ with that geometry. Bigiel radii are supplied as R/R25 and converted using the
 adopted Leroy R25. SPARC radii and velocities are transformed to the adopted
 geometry before the SPARC spline is fitted.
 """
-function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
+function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR, fit_config_dir=DEFAULT_FIT_CONFIG_DIR)
     galaxy = normalize_galaxy_name(name)
+    fit_config = joinpath(fit_config_dir, galaxy, "observational_fits.csv")
+    configured_factors = isfile(fit_config) ?
+        Dict(String(row.profile) => Float64(row.residual_factor) for row in CSV.File(fit_config)) :
+        Dict{String,Float64}()
+    fit_factors = (rotation=get(configured_factors, "rotation", 1.0),
+                   gas=get(configured_factors, "gas", 1.0), sfr=get(configured_factors, "sfr", 1.0))
 
     catalog = CSV.read(joinpath(input_dir, "galaxies_triple_overlap.csv"), DataFrame)
     catalog = catalog[catalog.galaxy .== galaxy, :]
@@ -313,8 +322,10 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
     ))
     sort!(sfr_measurements, :R_kpc)
 
-    gas_spline = fit_gas_smoothing_spline(gas_measurements.R_kpc, gas_measurements.value, gas_measurements.error)
-    sfr_spline = fit_sfr_smoothing_spline(sfr_measurements.R_kpc, sfr_measurements.value, sfr_measurements.error)
+    gas_spline = fit_gas_smoothing_spline(gas_measurements.R_kpc, gas_measurements.value, gas_measurements.error;
+                                          smoothing_factor=fit_factors.gas)
+    sfr_spline = fit_sfr_smoothing_spline(sfr_measurements.R_kpc, sfr_measurements.value, sfr_measurements.error;
+                                          smoothing_factor=fit_factors.sfr)
     sparc = CSV.read(joinpath(input_dir, "sparc_rotation_curves.csv"), DataFrame)
     sparc = sparc[sparc.galaxy .== galaxy, :]
     sparc = sparc[.!ismissing.(sparc.R_kpc) .&
@@ -337,7 +348,8 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
     sparc.Vobs_adopted_kms = sparc.Vobs_kms .* velocity_scale
     sparc.e_Vobs_adopted_kms = sparc.e_Vobs_kms .* abs(velocity_scale)
 
-    sparc_spline = fit_sparc_smoothing_spline(sparc.R_adopted_kpc, sparc.Vobs_adopted_kms, sparc.e_Vobs_adopted_kms)
+    sparc_spline = fit_sparc_smoothing_spline(sparc.R_adopted_kpc, sparc.Vobs_adopted_kms, sparc.e_Vobs_adopted_kms;
+                                              smoothing_factor=fit_factors.rotation)
 
     sparc_bounds = (minimum(sparc.R_adopted_kpc), maximum(sparc.R_adopted_kpc))
     common_bounds = (
@@ -348,6 +360,7 @@ function load_galaxy_observations(name; input_dir=DEFAULT_INPUT_DIR)
 
     return (
         galaxy = galaxy,
+        fit_factors = fit_factors,
         metadata = metadata,
         radial = radial,
         bigiel = bigiel,

@@ -74,6 +74,13 @@ for name in ("Z_nucl", "Z_CGM", "yield_y", "Z_outer_boundary", "n_points", "h_0_
 end
 CSV.write(joinpath(output_directory, "parameters.csv"), DataFrame(name=first.(parameters), value=last.(parameters)))
 cp(config_path, joinpath(output_directory, "config.csv"); force=true)
+CSV.write(joinpath(output_directory, "observational_fit_settings.csv"), DataFrame(
+    profile=["rotation", "gas", "sfr"],
+    fit_space=["linear", "linear", "natural_log"],
+    residual_factor=[observations.fit_factors.rotation, observations.fit_factors.gas, observations.fit_factors.sfr],
+    measurement_count=[nrow(observations.sparc), nrow(observations.gas_measurements), nrow(observations.sfr_measurements)],
+    calibration=["adopted geometry", "saved gas convention", "unchanged Leroy-Bigiel cross-calibration"],
+))
 
 spline_point_count = 750
 # Include the launch point whenever it has measured disk support, so the

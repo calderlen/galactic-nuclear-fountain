@@ -139,6 +139,7 @@ def main():
                            "font_sizes_pt": {"axis_labels": 9, "ticks": 8, "legends": 8, "title": 10},
                            "radius_major_ticks_kpc": [0, 5, 10, 15], "radius_minor_step_kpc": 1,
                            "inset_count": 0,
+                           "angular_deficit_limits": [0, 1],
                            "panels": ["landing", "angular_deficit", "accretion", "radial_velocity",
                                       "metallicity", "metallicity_gradient"],
                            "landing_limits_Msun_Gyr_kpc2": [1e5, 1e8],

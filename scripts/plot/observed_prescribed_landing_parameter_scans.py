@@ -99,8 +99,8 @@ def main():
         base,cases,profiles,resolved=calculate_cases(args,config,case_file,mode)
         angular_limits=(0,1)
         disk_fit,abundance,fit,observation_paths=figures.observations(args,base)
-        title=(f"Prescribed {'mixed ' if mode=='mixed' else ''}landing rate, "
-               f"required angular momentum for {galaxy_label(args.galaxy)}")
+        title=(f"{mode.capitalize()} fountain test, {galaxy_label(args.galaxy)} "
+               r"$v_c$, $\Sigma_g$, $\dot\Sigma_{\rm SFR}$; prescribed landing")
         section="section2" if mode=="unmixed" else "section3"
         stem=f"{section}_observed_prescribed_landing"
         directory=args.run_directory/mode
@@ -119,7 +119,7 @@ def main():
                   "beta_effect":"Changes the angular comparison only; excluded from chemistry panels",
                   "source_sha256":{str(path.resolve()):figures.sha256(path) for path in files}}
         manifest["figure"]={"layout":"3x2","size_inches":[7.2,4.5],
-                            "row_height_ratios":[1,1,1],"legend_rows":1,
+                            "row_height_ratios":[1,1,1],"legend_rows":2,
                             "font_sizes_pt":{"axis_labels":9,"ticks":8,"legends":8,"title":10},
                             "radius_major_ticks_kpc":[0,5,10,15],"radius_minor_step_kpc":1,
                             "inset_count":0,
@@ -151,13 +151,19 @@ def main():
             "Compact row gaps leave four points between neighboring texts, preserving panel sizes.\n"
             "Read across rows: landing and angular deficit; accretion and velocity; metallicity and gradient.\n"
             "Gas and stellar sink remain physical inputs and are omitted from the display.\n"
-            "Radius labels above and below both columns; one-row case legend below the panels.\n")
+            "Radius labels above and below both columns; paired two-row case legend below the panels.\n")
         chemistry_cases=[case for case in cases if case["group"]!="cgm_rotation"]
-        legend_handles=[figures.Line2D([],[],label=case["label"],**figures.case_style(case)) for case in cases]
-        legend_handles.append(figures.fit_legend_handle("KK04 spline"))
+        legend_handles=[figures.Line2D([],[],label=cases[0]["label"],**figures.case_style(cases[0])),
+                        figures.fit_legend_handle("KK04 spline")]
+        groups={}
+        for case in cases[1:]:
+            groups.setdefault(case["group"],[]).append(case)
+        for paired_cases in groups.values():
+            legend_handles.extend(figures.Line2D([],[],label=case["label"],**figures.case_style(case))
+                                  for case in paired_cases)
         legend_spec={"handles":legend_handles,
                      "labels":[handle.get_label() for handle in legend_handles],
-                     "ncol":len(legend_handles),"handlelength":1.0,"fontsize":8,
+                     "ncol":len(legend_handles)//2,"handlelength":1.0,"fontsize":8,
                      "handletextpad":.25,"columnspacing":.35}
         legend_spec.update(handlelength=.8,handletextpad=.15,columnspacing=.2)
         figure=figures.plot_flow_metallicity(args,cases,profiles,disk_fit,abundance,fit,
@@ -172,6 +178,7 @@ def main():
                                      show_disk_inputs=False,
                                      angular_panel_top_right=True,
                                      axis_fontsize=9,tick_fontsize=8,angular_legend_fontsize=8,
+                                     angular_legend_loc="best",
                                      figure_size=(7.2,4.5),legend_position="bottom",
                                      angular_comparison_label=(r"$j_{\rm nuc}$" if mode=="unmixed"
                                                                else r"$j_{\rm mix}$"))

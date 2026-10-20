@@ -22,7 +22,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter, LogLocator
+from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter, LogLocator, MaxNLocator
 import numpy as np
 
 from hershey_fonts import register_hershey_weight_aliases
@@ -592,6 +592,7 @@ def plot_flow_metallicity(args, cases, profiles, disk_fit, abundance, fit, *, st
                           angular_comparison_label=None,show_disk_inputs=True,
                           legend_position="bottom",chemistry_cases=None,angular_panel_top_right=False,
                           axis_fontsize=None,tick_fontsize=None,angular_legend_fontsize=6.5,
+                          angular_legend_loc="lower right",
                           abundance_spline=False, show_abundance_measurements=False):
     """Combine flow and chemistry, optionally omitting gas and stellar-sink panels."""
     if show_disk_inputs:
@@ -620,13 +621,21 @@ def plot_flow_metallicity(args, cases, profiles, disk_fit, abundance, fit, *, st
         if flow_axes[index] is not None:
             flow_axes[index].set_ylim(*limits)
             if index==5 and j_display=="deficit":
-                ticks=np.linspace(*flow_axes[index].get_ylim(),5)
+                lower,upper=flow_axes[index].get_ylim()
+                if (lower,upper)==(0,1):
+                    ticks=[0,.25,.5,.75,1]
+                elif (lower,upper)==DEFICIT_Y_LIMITS:
+                    ticks=[-1,0,1,2]
+                else:
+                    ticks=MaxNLocator(nbins=4,steps=[1,2,5,10]).tick_values(lower,upper)
+                    ticks=np.unique(np.r_[lower,ticks[(ticks>lower)&(ticks<upper)],upper])
                 flow_axes[index].set_yticks(ticks,labels=[f"{tick:g}" for tick in ticks])
     # Include these local keys before fitting margins and gutters to their extents.
     if angular_comparison_label:
         flow_axes[5].legend(handles=[Line2D([],[],color="black",label="required"),
                                Line2D([],[],color="black",linestyle="--",label=angular_comparison_label)],
-                       loc="lower right",fontsize=angular_legend_fontsize,frameon=False,handlelength=1.6)
+                       loc=angular_legend_loc,
+                       fontsize=angular_legend_fontsize,frameon=False,handlelength=1.6)
     if not abundance_spline or show_abundance_measurements:
         chemistry_axes[0].legend(handles=[observation_handle],loc="upper right",fontsize=8,
                        frameon=False,handlelength=1.8,borderaxespad=0.5)

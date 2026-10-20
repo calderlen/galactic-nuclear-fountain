@@ -12,7 +12,7 @@ from axis_labels import quantity_unit_label
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from color_palette import color_cycle
+from color_palette import BLUE, color_cycle
 import numpy as np
 from matplotlib.ticker import AutoMinorLocator, LogLocator, MaxNLocator, NullFormatter
 
@@ -27,7 +27,7 @@ import smplotlib
 ROOT = Path(__file__).resolve().parents[2]
 INPUTS = ROOT / "output/section3/inputs/NGC2403/observed_disk"
 OUTPUT = ROOT / "output/pdf/section2_ngc2403_observed_inputs"
-FIT_COLOR = "#0072B2"
+FIT_COLOR = BLUE
 SOLAR_Z = 0.0139
 FIGURE_SIZE = (84.0 / 25.4, 4.0)
 
@@ -94,7 +94,6 @@ def main():
     })
     fig, axes = plt.subplots(4, 1, sharex=True, figsize=FIGURE_SIZE)
     fig.subplots_adjust(left=0.18, right=0.98, bottom=0.20, top=0.93, hspace=0.18)
-    heading=fig.suptitle("NGC 2403 observational inputs", x=0.5, y=0.99, fontsize=9)
 
     rotation_handle=measurements(axes[0], select(rotation, "measurement"), "Vobs_kms",
                                  "e_Vobs_kms", "SPARC", marker="^", markersize=1.8)
@@ -172,11 +171,10 @@ def main():
         left=(max(axis.bbox.x0-box.x0 for axis,box in zip(axes,boxes))+gap)/fig.bbox.width
         right=1-(max(box.x1-axis.bbox.x1 for axis,box in zip(axes,boxes))+gap)/fig.bbox.width
         bottom=fig.subplotpars.bottom+(legend.get_window_extent(renderer).y1+gap-boxes[-1].y0)/fig.bbox.height
-        top=fig.subplotpars.top+(heading.get_window_extent(renderer).y0-gap-boxes[0].y1)/fig.bbox.height
+        top=1-(max(0,boxes[0].y1-axes[0].bbox.y1)+gap)/fig.bbox.height
         row_gap=max(axes[i].bbox.y0-boxes[i].y0+boxes[i+1].y1-axes[i+1].bbox.y1 for i in range(3))+gap
         height=(top-bottom)*fig.bbox.height
         fig.subplots_adjust(left=left,right=right,bottom=bottom,top=top, hspace=4*row_gap/(height-3*row_gap))
-        heading.set_x((left+right)/2)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUTPUT.with_suffix(".pdf"), format="pdf")
@@ -185,7 +183,7 @@ def main():
     notes = (
         "NGC 2403 observational inputs for Section 2.2.\n"
         "Panels: rotation, gas surface density, net stellar sink, and metallicity in solar units.\n"
-        "Layout: short 4x1 stack at 84 mm single-column width and 4 inches high.\n"
+        "Layout: title-free short 4x1 stack at 84 mm single-column width and 4 inches high.\n"
         "Axis and shared external-legend text use 8-point type at the final printed size.\n"
         "Black measurements include endcapped measurement-error bars. Blue curves are\n"
         "saved adopted rotation/gas/stellar-sink profiles and the shared weighted abundance spline.\n"
